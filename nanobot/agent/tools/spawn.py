@@ -32,7 +32,8 @@ class SpawnTool(Tool):
         return (
             "Spawn a subagent to handle a task in the background. "
             "Use this for complex or time-consuming tasks that can run independently. "
-            "The subagent will complete the task and report back when done."
+            "The subagent will complete the task and report back when done. "
+            "Set use_opencode=true when the task needs the OpenCode Serve harness."
         )
 
     @property

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.subagent import RunningTaskInfo, SubagentManager
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import OpenCodeServeConfig
 from nanobot.opencode_client import OpencodeServeClient
@@ -45,30 +45,74 @@ async def test_spawn_uses_explicit_opencode_backend(tmp_path, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_poll_opencode_tasks_returns_completed_messages(tmp_path, monkeypatch) -> None:
+async def test_opencode_task_waits_for_final_message(tmp_path, monkeypatch) -> None:
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
     mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=MessageBus())
 
-    async def fake_run(task_id: str, task: str, label: str, origin: dict[str, str]) -> None:
-        return None
-
-    monkeypatch.setattr(mgr, "_run_opencode_task", fake_run)
-
-    task_result = await mgr.spawn("do thing", use_opencode=True)
-    task_id = task_result.split("id: ")[-1].split(")", 1)[0]
-    info = mgr._running_tasks[task_id]
-    info.session_id = "sess-1"
+    responses = [[], [{"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "done"}]}]]
 
     async def fake_list_messages(self, session_id: str):
         assert session_id == "sess-1"
-        return [{"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "done"}]}]
+        return responses.pop(0)
 
     monkeypatch.setattr(OpencodeServeClient, "list_messages", fake_list_messages)
+    monkeypatch.setattr("nanobot.agent.subagent.asyncio.sleep", AsyncMock(return_value=None))
 
-    completed = await mgr.poll_opencode_tasks()
-    await asyncio.sleep(0)
+    client = MagicMock()
+    client.list_messages = AsyncMock(
+        side_effect=[
+            [],
+            [{"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "done"}]}],
+        ]
+    )
 
-    assert len(completed) == 1
-    assert completed[0][0].task_id == task_id
-    assert completed[0][2] == "done"
+    result = await mgr._wait_for_opencode_result(client, "sess-1")
+
+    assert result == "done"
+
+
+@pytest.mark.asyncio
+async def test_run_opencode_task_announces_result(tmp_path, monkeypatch) -> None:
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=MessageBus())
+
+    fake_client = AsyncMock()
+    fake_client.create_session.return_value = {"id": "sess-1"}
+    fake_client.prompt_async.return_value = {}
+    fake_client.aclose.return_value = None
+    monkeypatch.setattr("nanobot.agent.subagent.OpencodeServeClient", lambda **kwargs: fake_client)
+
+    announced: list[tuple[str, str, str, str, dict[str, str], str]] = []
+
+    async def fake_announce(task_id, label, task, result, origin, status):
+        announced.append((task_id, label, task, result, origin, status))
+
+    monkeypatch.setattr(mgr, "_wait_for_opencode_result", AsyncMock(return_value="finished"))
+    monkeypatch.setattr(mgr, "_announce_result", fake_announce)
+
+    current = asyncio.current_task()
+    assert current is not None
+    mgr._running_tasks["task1"] = RunningTaskInfo(
+        task_id="task1",
+        label="research",
+        backend="opencode",
+        raw_task=current,
+    )
+
+    await mgr._run_opencode_task(
+        "task1", "research this", "research", {"channel": "telegram", "chat_id": "123"}
+    )
+
+    assert mgr._running_tasks["task1"].status == "completed"
+    assert announced == [
+        (
+            "task1",
+            "research",
+            "research this",
+            "finished",
+            {"channel": "telegram", "chat_id": "123"},
+            "ok",
+        )
+    ]

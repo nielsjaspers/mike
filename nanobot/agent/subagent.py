@@ -7,7 +7,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -216,12 +216,38 @@ class SubagentManager:
                 agent=self.opencode_config.agent,
             )
             logger.info("Subagent [{}] OpenCode session started: {}", task_id, session_id)
+
+            result = await self._wait_for_opencode_result(client, session_id)
+            self._running_tasks[task_id].status = "completed"
+            logger.info("Subagent [{}] OpenCode task completed", task_id)
+            await self._announce_result(task_id, label, task, result, origin, "ok")
+        except asyncio.CancelledError:
+            logger.info("Subagent [{}] OpenCode task cancelled", task_id)
+            raise
         except Exception as e:
             self._running_tasks[task_id].status = "failed"
             logger.error("Subagent [{}] OpenCode execution failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, f"Error: {e}", origin, "error")
         finally:
             await client.aclose()
+
+    async def _wait_for_opencode_result(self, client: OpencodeServeClient, session_id: str) -> str:
+        """Poll OpenCode until an assistant message with text is available."""
+        max_polls = 900
+        for _ in range(max_polls):
+            items = await client.list_messages(session_id)
+            if items:
+                for message in reversed(items):
+                    if not isinstance(message, dict):
+                        continue
+                    info = message.get("info") or {}
+                    if info.get("role") != "assistant":
+                        continue
+                    text = OpencodeServeClient.extract_text(message)
+                    if text:
+                        return text
+            await asyncio.sleep(2)
+        raise TimeoutError("OpenCode task timed out while waiting for a final assistant message")
 
     def _build_native_tools(self) -> ToolRegistry:
         tools = ToolRegistry()
@@ -352,44 +378,6 @@ Stay focused on the assigned task. Your final response will be reported back to 
         if session_key is None:
             return tasks
         return [task for task in tasks if task.session_key == session_key]
-
-    async def poll_opencode_tasks(self) -> list[tuple[RunningTaskInfo, str, str]]:
-        """Poll running OpenCode tasks and return completed ones with final text."""
-        done: list[tuple[RunningTaskInfo, str, str]] = []
-        pending = [
-            task
-            for task in self._running_tasks.values()
-            if task.backend == "opencode" and task.status == "running" and task.session_id
-        ]
-        for task in pending:
-            assert task.session_id is not None
-            client = OpencodeServeClient(
-                base_url=self.opencode_config.url,
-                username=self.opencode_config.username,
-                password=self.opencode_config.password,
-            )
-            try:
-                items = await client.list_messages(task.session_id)
-            except Exception:
-                await client.aclose()
-                continue
-            finally:
-                await client.aclose()
-            if not isinstance(items, list) or not items:
-                continue
-            last = items[-1]
-            if not isinstance(last, dict):
-                continue
-            info = last.get("info") or {}
-            role = info.get("role")
-            if role != "assistant":
-                continue
-            text = OpencodeServeClient.extract_text(last)
-            if not text:
-                continue
-            task.status = "completed"
-            done.append((task, task.label, text))
-        return done
 
     async def inject_context(
         self,

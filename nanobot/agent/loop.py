@@ -264,19 +264,6 @@ class AgentLoop:
         logger.info("Agent loop started")
 
         while self._running:
-            completed_tasks = await self.subagents.poll_opencode_tasks()
-            for task_info, label, result in completed_tasks:
-                if not task_info.session_key:
-                    continue
-                channel, chat_id = task_info.session_key.split(":", 1)
-                await self.subagents._announce_result(  # noqa: SLF001
-                    task_info.task_id,
-                    label,
-                    label,
-                    result,
-                    {"channel": channel, "chat_id": chat_id},
-                    "ok",
-                )
             try:
                 msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
             except asyncio.TimeoutError:
@@ -450,6 +437,7 @@ class AgentLoop:
                 "/research <task> — Run a complex task with OpenCode Serve",
                 "/status — Show running background tasks",
                 "/context <text> — Add context to a running OpenCode task",
+                "Tip: the agent can also call `spawn` itself and set `use_opencode=true` for complex delegated work.",
             ]
             return OutboundMessage(
                 channel=msg.channel,
@@ -490,6 +478,13 @@ class AgentLoop:
             result = await self.subagents.inject_context(key, extra)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+
+        if cmd.startswith("/research "):
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Usage: /research <task description>",
+            )
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):

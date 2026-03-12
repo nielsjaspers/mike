@@ -467,7 +467,8 @@ class TelegramChannel(BaseChannel):
             "/status — Show running background tasks\n"
             "/context — Add context to a running OpenCode task\n"
             "/restart — Restart the bot\n"
-            "/help — Show available commands"
+            "/help — Show available commands\n\n"
+            "Tip: delegated tasks can also use OpenCode via the spawn tool."
         )
 
     @staticmethod
