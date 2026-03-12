@@ -12,8 +12,8 @@ from typing import Any
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
-from nanobot.bus.events import InboundMessage
+from nanobot.agent.tools.web import WebFetchTool
+from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ExecToolConfig, OpenCodeServeConfig
 from nanobot.opencode_client import OpencodeServeClient
@@ -33,6 +33,8 @@ class RunningTaskInfo:
     raw_task: asyncio.Task[None]
     session_id: str | None = None
     session_key: str | None = None
+    origin_channel: str | None = None
+    origin_chat_id: str | None = None
     status: str = "running"
 
 
@@ -63,6 +65,10 @@ class SubagentManager:
         self._running_tasks: dict[str, RunningTaskInfo] = {}
         self._session_tasks: dict[str, set[str]] = {}
 
+    @property
+    def opencode_enabled(self) -> bool:
+        return self.opencode_config.enabled
+
     async def spawn(
         self,
         task: str,
@@ -73,6 +79,8 @@ class SubagentManager:
         use_opencode: bool | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
+        if use_opencode and not self.opencode_enabled:
+            return "Error: OpenCode Serve is not enabled in config."
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
@@ -88,6 +96,8 @@ class SubagentManager:
             task_id=task_id, label=display_label, backend=backend, raw_task=bg_task
         )
         info.session_key = session_key
+        info.origin_channel = origin_channel
+        info.origin_chat_id = origin_chat_id
         self._running_tasks[task_id] = info
         if session_key:
             self._session_tasks.setdefault(session_key, set()).add(task_id)
@@ -106,6 +116,39 @@ class SubagentManager:
             f"Task [{display_label}] started via {backend} runtime (id: {task_id}). "
             "I'll notify you when it completes."
         )
+
+    async def run_opencode_query(
+        self,
+        text: str,
+        label: str | None = None,
+        origin_channel: str = "cli",
+        origin_chat_id: str = "direct",
+    ) -> str:
+        """Run an OpenCode query synchronously and return the actual result text."""
+        if not self.opencode_enabled:
+            return "Error: OpenCode Serve is not enabled in config."
+
+        client = OpencodeServeClient(
+            base_url=self.opencode_config.url,
+            username=self.opencode_config.username,
+            password=self.opencode_config.password,
+            directory=str(self.workspace),
+        )
+        try:
+            session = await client.create_session(title=label)
+            session_id = session.get("id") or session.get("data", {}).get("id")
+            if not isinstance(session_id, str) or not session_id:
+                raise RuntimeError("OpenCode Serve did not return a session id")
+            await client.prompt_async(
+                session_id=session_id,
+                text=text,
+                provider_id=self.opencode_config.model_provider_id,
+                model_id=self.opencode_config.model_id,
+                agent=self.opencode_config.agent,
+            )
+            return await self._wait_for_opencode_result(client, session_id)
+        finally:
+            await client.aclose()
 
     def _select_backend(self, use_opencode: bool | None, task: str) -> str:
         if use_opencode is not None:
@@ -200,6 +243,7 @@ class SubagentManager:
             base_url=self.opencode_config.url,
             username=self.opencode_config.username,
             password=self.opencode_config.password,
+            directory=str(self.workspace),
         )
         try:
             session = await client.create_session(title=label)
@@ -264,7 +308,6 @@ class SubagentManager:
                 path_append=self.exec_config.path_append,
             )
         )
-        tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
         tools.register(WebFetchTool(proxy=self.web_proxy))
         return tools
 
@@ -277,32 +320,36 @@ class SubagentManager:
         origin: dict[str, str],
         status: str,
     ) -> None:
-        """Announce the subagent result to the main agent via the message bus."""
-        status_text = "completed successfully" if status == "ok" else "failed"
+        """Announce the subagent result directly and preserve it in main session context."""
+        status_text = "completed" if status == "ok" else "failed"
+        prefix = f"[{label} {status_text}]"
+        content = f"{prefix}\n\n{result}"
         task_info = self._running_tasks.get(task_id)
-        backend = "task"
-        if task_info is not None:
-            backend = task_info.backend
-
-        announce_content = f"""[{backend} task '{label}' {status_text}]
-
-Task: {task}
-
-Result:
-{result}
-
-Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like task IDs unless relevant."""
-
-        msg = InboundMessage(
-            channel="system",
-            sender_id="subagent",
-            chat_id=f"{origin['channel']}:{origin['chat_id']}",
-            content=announce_content,
+        origin_channel = origin["channel"]
+        origin_chat_id = origin["chat_id"]
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=origin_channel,
+                chat_id=origin_chat_id,
+                content=content,
+            )
         )
-
-        await self.bus.publish_inbound(msg)
+        if task_info and task_info.session_key:
+            await self.bus.publish_inbound(
+                InboundMessage(
+                    channel="system",
+                    sender_id="subagent",
+                    chat_id=task_info.session_key,
+                    content=(
+                        f"OpenCode task result for '{label}' ({status_text}).\n\n"
+                        f"Original task:\n{task}\n\n"
+                        f"Actual result:\n{result}\n\n"
+                        "Use this as factual context for future turns. Do not claim the task lacked output."
+                    ),
+                )
+            )
         logger.debug(
-            "Subagent [{}] announced result to {}:{}", task_id, origin["channel"], origin["chat_id"]
+            "Subagent [{}] announced result to {}:{}", task_id, origin_channel, origin_chat_id
         )
 
     def _build_subagent_prompt(self) -> str:
@@ -333,8 +380,9 @@ Stay focused on the assigned task. Your final response will be reported back to 
 
     def _build_opencode_prompt(self, task: str) -> str:
         return (
-            "You are handling a delegated Nanobot task. Stay focused, use tools when useful, "
-            "and produce a concise final result that can be forwarded back to the user.\n\n"
+            "You are handling a delegated Nanobot task inside OpenCode Serve. "
+            "Prefer OpenCode's own tools for web search, web fetch, file edits, patches, and shell work. "
+            "Produce the actual final result for the user, not a meta-summary about what you intended to do.\n\n"
             f"Task:\n{task}"
         )
 
@@ -404,6 +452,7 @@ Stay focused on the assigned task. Your final response will be reported back to 
             base_url=self.opencode_config.url,
             username=self.opencode_config.username,
             password=self.opencode_config.password,
+            directory=str(self.workspace),
         )
         try:
             await client.prompt(

@@ -106,6 +106,8 @@ async def test_run_opencode_task_announces_result(tmp_path, monkeypatch) -> None
     )
 
     assert mgr._running_tasks["task1"].status == "completed"
+    fake_client.create_session.assert_awaited_once()
+    fake_client.prompt_async.assert_awaited_once()
     assert announced == [
         (
             "task1",

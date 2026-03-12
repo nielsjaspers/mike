@@ -19,15 +19,20 @@ class OpencodeServeClient:
         base_url: str,
         username: str = "opencode",
         password: str = "",
+        directory: str | None = None,
         timeout: int = 1800,
     ):
         auth = None
         if password:
             auth = (username, password)
+        headers: dict[str, str] = {}
+        if directory:
+            headers["x-opencode-directory"] = directory
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout,
             auth=auth,
+            headers=headers,
         )
 
     async def aclose(self) -> None:
