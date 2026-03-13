@@ -169,6 +169,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("stop", "Stop the current task"),
         BotCommand("help", "Show available commands"),
         BotCommand("restart", "Restart the bot"),
+        BotCommand("model", "Show or switch LLM model"),
         BotCommand("research", "Run a complex research task"),
         BotCommand("status", "Show running background tasks"),
         BotCommand("context", "Add context to a running OpenCode task"),
@@ -232,6 +233,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("stop", self._forward_command))
         self._app.add_handler(CommandHandler("restart", self._forward_command))
+        self._app.add_handler(CommandHandler("model", self._forward_command))
         self._app.add_handler(CommandHandler("research", self._forward_command))
         self._app.add_handler(CommandHandler("status", self._forward_command))
         self._app.add_handler(CommandHandler("context", self._forward_command))
@@ -463,6 +465,7 @@ class TelegramChannel(BaseChannel):
             "🐈 nanobot commands:\n"
             "/new — Start a new conversation\n"
             "/stop — Stop the current task\n"
+            "/model — Show or switch LLM model\n"
             "/research — Run a complex task in OpenCode Serve\n"
             "/status — Show running background tasks\n"
             "/context — Add context to a running OpenCode task\n"
