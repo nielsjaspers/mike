@@ -74,6 +74,12 @@ def test_heartbeat_is_disabled_by_default() -> None:
     assert config.gateway.heartbeat.enabled is False
 
 
+def test_opencode_is_disabled_by_default() -> None:
+    config = Config()
+
+    assert config.gateway.opencode.enabled is False
+
+
 def test_onboard_existing_config_refresh(mock_paths):
     """Config exists, user declines overwrite — should refresh (load-merge-save)."""
     config_file, workspace_dir = mock_paths

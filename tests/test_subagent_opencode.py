@@ -164,6 +164,7 @@ async def test_run_opencode_task_announces_result(tmp_path, monkeypatch) -> None
         label="research",
         backend="opencode",
         raw_task=current,
+        task="research this",
     )
 
     await mgr._run_opencode_task(

@@ -35,6 +35,7 @@ class RunningTaskInfo:
     session_key: str | None = None
     origin_channel: str | None = None
     origin_chat_id: str | None = None
+    task: str | None = None
     status: str = "running"
 
 
@@ -98,6 +99,7 @@ class SubagentManager:
         info.session_key = session_key
         info.origin_channel = origin_channel
         info.origin_chat_id = origin_chat_id
+        info.task = task
         self._running_tasks[task_id] = info
         if session_key:
             self._session_tasks.setdefault(session_key, set()).add(task_id)
@@ -340,11 +342,20 @@ class SubagentManager:
         task_info = self._running_tasks.get(task_id)
         origin_channel = origin["channel"]
         origin_chat_id = origin["chat_id"]
+        task_text = task_info.task if task_info and task_info.task else task
         await self.bus.publish_outbound(
             OutboundMessage(
                 channel=origin_channel,
                 chat_id=origin_chat_id,
                 content=content,
+                metadata={
+                    "_task_result": True,
+                    "task_id": task_id,
+                    "task_label": label,
+                    "task_status": status_text,
+                    "task_backend": task_info.backend if task_info else None,
+                    "task_text": task_text,
+                },
             )
         )
         if task_info and task_info.session_key:
@@ -355,10 +366,19 @@ class SubagentManager:
                     chat_id=task_info.session_key,
                     content=(
                         f"OpenCode task result for '{label}' ({status_text}).\n\n"
-                        f"Original task:\n{task}\n\n"
+                        f"Task ID: {task_id}\n\n"
+                        f"Original task:\n{task_text}\n\n"
                         f"Actual result:\n{result}\n\n"
                         "Use this as factual context for future turns. Do not claim the task lacked output."
                     ),
+                    metadata={
+                        "_task_result": True,
+                        "task_id": task_id,
+                        "task_label": label,
+                        "task_status": status_text,
+                        "task_backend": task_info.backend,
+                        "task_text": task_text,
+                    },
                 )
             )
         logger.debug(

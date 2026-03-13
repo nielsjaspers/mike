@@ -25,6 +25,7 @@ async def test_announce_result_sends_direct_outbound_message(tmp_path) -> None:
         backend="opencode",
         raw_task=current,
         session_key="telegram:123",
+        task="research async queues",
     )
 
     await mgr._announce_result(
@@ -45,6 +46,8 @@ async def test_announce_result_sends_direct_outbound_message(tmp_path) -> None:
     assert outbound.channel == "telegram"
     assert outbound.chat_id == "123"
     assert "Here are the actual findings." in outbound.content
+    assert outbound.metadata["task_id"] == "task1"
+    assert outbound.metadata["task_text"] == "research async queues"
 
     inbound_call = bus.publish_inbound.await_args
     assert inbound_call is not None
@@ -52,6 +55,7 @@ async def test_announce_result_sends_direct_outbound_message(tmp_path) -> None:
     assert inbound.channel == "system"
     assert inbound.chat_id == "telegram:123"
     assert "Actual result" in inbound.content
+    assert inbound.metadata["task_id"] == "task1"
 
 
 @pytest.mark.asyncio

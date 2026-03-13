@@ -377,6 +377,24 @@ class AgentLoop:
             channel, chat_id = (
                 msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
             )
+            if (msg.metadata or {}).get("_task_result"):
+                logger.info(
+                    "Recording task result context for {}:{} task_id={}",
+                    channel,
+                    chat_id,
+                    (msg.metadata or {}).get("task_id"),
+                )
+                key = f"{channel}:{chat_id}"
+                session = self.sessions.get_or_create(key)
+                session.add_message(
+                    "system",
+                    msg.content,
+                    task_id=(msg.metadata or {}).get("task_id"),
+                    task_label=(msg.metadata or {}).get("task_label"),
+                    task_status=(msg.metadata or {}).get("task_status"),
+                )
+                self.sessions.save(session)
+                return None
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
