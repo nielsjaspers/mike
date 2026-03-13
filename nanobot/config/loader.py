@@ -72,4 +72,11 @@ def _migrate_config(data: dict) -> dict:
     exec_cfg = tools.get("exec", {})
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
+
+    research = data.get("research")
+    if isinstance(research, dict):
+        if research.get("defaultBackend") == "native":
+            research["defaultBackend"] = "opencode"
+        if research.get("default_backend") == "native":
+            research["default_backend"] = "opencode"
     return data

@@ -17,7 +17,9 @@ async def test_system_task_result_is_recorded_without_requerying_llm(tmp_path) -
     with (
         patch("nanobot.agent.loop.ContextBuilder"),
         patch("nanobot.agent.loop.SubagentManager"),
+        patch("nanobot.agent.loop.ResearchManager") as MockResearch,
     ):
+        MockResearch.return_value.bind_tools.return_value = None
         loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
 
     loop.memory_consolidator.maybe_consolidate_by_tokens = AsyncMock()

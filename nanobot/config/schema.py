@@ -318,6 +318,18 @@ class OpenCodeServeConfig(Base):
     agent: str | None = None
 
 
+class ResearchConfig(Base):
+    """Iterative research task configuration."""
+
+    enabled: bool = True
+    default_backend: Literal["opencode"] = "opencode"
+    auto_resume: bool = True
+    native_subagent_max_iterations: int = 15
+    opencode_agent: str | None = None
+    allow_prototypes: bool = True
+    progress_poll_seconds: float = 2.0
+
+
 class GatewayConfig(Base):
     """Gateway/server configuration."""
 
@@ -378,6 +390,7 @@ class Config(BaseSettings):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    research: ResearchConfig = Field(default_factory=ResearchConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
 
     @property

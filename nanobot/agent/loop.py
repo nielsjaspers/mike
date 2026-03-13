@@ -33,22 +33,29 @@ AVAILABLE_MODELS: dict[str, dict[str, Any]] = {
 
 DEFAULT_MODEL = "kimi-k2.5"
 from nanobot.agent.memory import MemoryConsolidator
+from nanobot.agent.tools.research import ResearchTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
-from nanobot.agent.tools.opencode import OpenCodeDelegateTool, OpenCodeWebSearchTool
+from nanobot.agent.tools.opencode import OpenCodeDelegateTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
-from nanobot.agent.tools.web import WebFetchTool
+from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
+from nanobot.research.manager import ResearchManager
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, OpenCodeServeConfig
+    from nanobot.config.schema import (
+        ChannelsConfig,
+        ExecToolConfig,
+        OpenCodeServeConfig,
+        ResearchConfig,
+    )
     from nanobot.cron.service import CronService
 
 
@@ -83,9 +90,10 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         opencode_config: OpenCodeServeConfig | None = None,
+        research_config: ResearchConfig | None = None,
         save_config_callback: Callable[[], None] | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
+        from nanobot.config.schema import ExecToolConfig, ResearchConfig
 
         self.bus = bus
         self.channels_config = channels_config
@@ -100,6 +108,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.research_config = research_config or ResearchConfig()
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -113,6 +122,16 @@ class AgentLoop:
             web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            opencode_config=opencode_config,
+            native_max_iterations=self.research_config.native_subagent_max_iterations,
+        )
+        self.research = ResearchManager(
+            workspace=workspace,
+            provider=provider,
+            bus=bus,
+            tools=self.tools,
+            model=self.model,
+            config=self.research_config,
             opencode_config=opencode_config,
         )
 
@@ -148,13 +167,19 @@ class AgentLoop:
                 path_append=self.exec_config.path_append,
             )
         )
-        self.tools.register(OpenCodeWebSearchTool(manager=self.subagents))
-        self.tools.register(OpenCodeDelegateTool(manager=self.subagents))
+        self.tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
+        self.tools.register(OpenCodeDelegateTool(manager=self.research))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
+        self.tools.register(ResearchTool(manager=self.research))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+        self.research.bind_tools(self.tools)
+
+    async def resume_research_tasks(self) -> None:
+        """Resume persisted research tasks after startup."""
+        await self.research.resume_pending()
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -179,16 +204,26 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None, model: str | None = None) -> None:
+    def _set_tool_context(
+        self, channel: str, chat_id: str, message_id: str | None = None, model: str | None = None
+    ) -> None:
         """Update context for all tools that need routing info."""
-        for name in ("message", "spawn", "cron", "web_search", "opencode_delegate"):
+        for name in (
+            "message",
+            "spawn",
+            "cron",
+            "web_search",
+            "opencode_search",
+            "opencode_delegate",
+            "research",
+        ):
             if tool := self.tools.get(name):
                 tool_obj = tool
                 setter = getattr(tool_obj, "set_context", None)
                 if callable(setter):
                     if name == "message":
                         setter(channel, chat_id, message_id)
-                    elif name == "spawn":
+                    elif name in {"spawn", "web_search", "opencode_search", "research"}:
                         setter(channel, chat_id, model)
                     else:
                         setter(channel, chat_id)
@@ -224,7 +259,7 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
-        
+
         # Use provided model or fall back to instance default
         effective_model = model or self.model or DEFAULT_MODEL
 
@@ -293,6 +328,7 @@ class AgentLoop:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
         await self._connect_mcp()
+        await self.resume_research_tasks()
         logger.info("Agent loop started")
 
         while self._running:
@@ -325,8 +361,9 @@ class AgentLoop:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
+        research_cancelled = await self.research.cancel_by_session(msg.session_key)
         sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
-        total = cancelled + sub_cancelled
+        total = cancelled + sub_cancelled + research_cancelled
         content = f"Stopped {total} task(s)." if total else "No active task to stop."
         await self.bus.publish_outbound(
             OutboundMessage(
@@ -430,7 +467,9 @@ class AgentLoop:
             session = self.sessions.get_or_create(key)
             effective_model = self._get_effective_model(session)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), effective_model)
+            self._set_tool_context(
+                channel, chat_id, msg.metadata.get("message_id"), effective_model
+            )
             history = session.get_history(max_messages=0)
             messages = self.context.build_messages(
                 history=history,
@@ -488,9 +527,9 @@ class AgentLoop:
                 "/model — Show current model and available options",
                 "/model <name> — Switch to a different model for this session",
                 "/model reset — Reset to default model",
-                "/research <task> — Run a complex task with OpenCode Serve",
-                "/status — Show running background tasks",
-                "/context <text> — Add context to a running OpenCode task",
+                "/research <task> — Run an iterative background research task",
+                "/status — Show running background and research tasks",
+                "/context <text> — Add context to a running research task",
                 "Tip: the agent can also call `spawn` itself and set `use_opencode=true` for complex delegated work.",
             ]
             return OutboundMessage(
@@ -511,13 +550,11 @@ class AgentLoop:
                     chat_id=msg.chat_id,
                     content="Usage: /research <task description>",
                 )
-            result = await self.subagents.spawn(
-                task=task,
-                label="research",
-                origin_channel=msg.channel,
-                origin_chat_id=msg.chat_id,
+            result = await self.research.start_task(
+                query=task,
                 session_key=key,
-                use_opencode=True,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
         if cmd == "/status":
@@ -534,7 +571,7 @@ class AgentLoop:
                     chat_id=msg.chat_id,
                     content="Usage: /context <extra information>",
                 )
-            result = await self.subagents.inject_context(key, extra)
+            result = await self.research.inject_context(key, extra)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
         await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
@@ -548,8 +585,10 @@ class AgentLoop:
         # Determine model to use with vision fallback
         effective_model = self._get_effective_model(session)
         vision_fallback = False
-        
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), effective_model)
+
+        self._set_tool_context(
+            msg.channel, msg.chat_id, msg.metadata.get("message_id"), effective_model
+        )
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
@@ -581,7 +620,7 @@ class AgentLoop:
             on_progress=on_progress or _bus_progress,
             model=effective_model,
         )
-        
+
         # Append vision fallback notice if applicable
         if vision_fallback and final_content:
             final_content = f"[Switched to {DEFAULT_MODEL} for image support]\n\n{final_content}"
@@ -611,23 +650,35 @@ class AgentLoop:
             return session.current_model
         return self.model or DEFAULT_MODEL
 
+    def _sync_opencode_model(self, session: Session) -> None:
+        if not self.opencode_config:
+            return
+        self.opencode_config.model_id = self._get_effective_model(session)
+        if self.save_config_callback:
+            self.save_config_callback()
+
     def _has_vision_content(self, msg: InboundMessage) -> bool:
         """Check if a message contains vision content (images)."""
         if not msg.media:
             return False
         for item in msg.media:
+            if isinstance(item, str):
+                lower = item.lower()
+                if lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+                    return True
+                continue
+            if not isinstance(item, dict):
+                continue
             if item.get("type") in ("image", "photo", "image_url"):
                 return True
             if item.get("mime_type", "").startswith("image/"):
                 return True
         return False
 
-    async def _handle_model_command(
-        self, msg: InboundMessage, session
-    ) -> OutboundMessage:
+    async def _handle_model_command(self, msg: InboundMessage, session) -> OutboundMessage:
         """Handle the /model command."""
         parts = msg.content.strip().split(maxsplit=1)
-        
+
         if len(parts) == 1:
             # Just /model — show current and available
             current = self._get_effective_model(session)
@@ -649,38 +700,34 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content="\n".join(lines),
             )
-        
+
         subcmd = parts[1].lower().strip()
-        
+
         if subcmd == "reset":
             old_model = self._get_effective_model(session)
             session.current_model = None
             self.sessions.save(session)
             new_model = self._get_effective_model(session)
-            if self.opencode_config and self.save_config_callback:
-                self.opencode_config.model_id = DEFAULT_MODEL
-                self.save_config_callback()
+            self._sync_opencode_model(session)
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=f"Model reset from {old_model} to default ({new_model}).",
             )
-        
+
         if subcmd in AVAILABLE_MODELS:
             old_model = self._get_effective_model(session)
             session.current_model = subcmd
             self.sessions.save(session)
             info = AVAILABLE_MODELS[subcmd]
             vision_note = " Supports images." if info["vision"] else " Text-only."
-            if self.opencode_config and self.save_config_callback:
-                self.opencode_config.model_id = subcmd
-                self.save_config_callback()
+            self._sync_opencode_model(session)
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=f"Model switched from {old_model} to {subcmd}.{vision_note}",
             )
-        
+
         # Unknown model
         available = ", ".join(AVAILABLE_MODELS.keys())
         return OutboundMessage(
@@ -690,10 +737,11 @@ class AgentLoop:
         )
 
     def _format_task_status(self, session_key: str) -> str:
+        research = self.research.format_status(session_key)
         tasks = self.subagents.get_tasks(session_key)
         if not tasks:
-            return "No background tasks running for this chat."
-        lines = ["Background tasks:"]
+            return research
+        lines = [research, "", "Background tasks:"]
         for task in tasks:
             lines.append(f"- {task.task_id} [{task.backend}] {task.label} — {task.status}")
         return "\n".join(lines)

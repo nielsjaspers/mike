@@ -184,3 +184,24 @@ async def test_run_opencode_task_announces_result(tmp_path, monkeypatch) -> None
             "ok",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_native_iteration_limit_comes_from_config(tmp_path) -> None:
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    mgr = SubagentManager(
+        provider=provider, workspace=tmp_path, bus=MessageBus(), native_max_iterations=22
+    )
+
+    assert mgr.native_max_iterations == 22
+
+
+def test_native_subagent_tools_include_web_search(tmp_path) -> None:
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=MessageBus())
+
+    tools = mgr._build_native_tools()
+
+    assert tools.has("web_search")

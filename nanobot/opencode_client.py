@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -80,6 +81,9 @@ class OpencodeServeClient:
             return payload
         return []
 
+    async def get_session(self, session_id: str) -> dict[str, Any]:
+        return await self._request_json("GET", f"/session/{session_id}")
+
     async def prompt_async(
         self,
         session_id: str,
@@ -103,6 +107,36 @@ class OpencodeServeClient:
         if no_reply:
             body["noReply"] = True
         return await self._request_json("POST", f"/session/{session_id}/prompt_async", json=body)
+
+    async def wait_for_text(
+        self, session_id: str, max_polls: int = 900, delay_s: float = 2.0
+    ) -> str:
+        """Poll until an assistant text response is available."""
+        for _ in range(max_polls):
+            items = await self.list_messages(session_id)
+            assistants = []
+            for message in items:
+                if not isinstance(message, dict):
+                    continue
+                info = message.get("info") or {}
+                if info.get("role") == "assistant":
+                    assistants.append(message)
+            if assistants:
+                latest = assistants[-1]
+                info = latest.get("info") or {}
+                text = self.extract_text(latest)
+                if text:
+                    return text
+                finish = info.get("finish")
+                time_info = info.get("time") if isinstance(info, dict) else None
+                if finish not in (None, "tool-calls") and isinstance(time_info, dict):
+                    if time_info.get("completed") is not None:
+                        break
+            await asyncio.sleep(delay_s)
+        raise RuntimeError(
+            "OpenCode task completed without a text result. "
+            "This usually means the session only produced reasoning or tool traces without a final answer."
+        )
 
     @staticmethod
     def extract_text(payload: dict[str, Any]) -> str:

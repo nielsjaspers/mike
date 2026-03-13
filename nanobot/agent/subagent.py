@@ -11,6 +11,7 @@ from typing import Any
 
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.tools.opencode_search import OpencodeSearchTool
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebFetchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -53,6 +54,7 @@ class SubagentManager:
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
         opencode_config: OpenCodeServeConfig | None = None,
+        native_max_iterations: int = 15,
     ):
         self.provider = provider
         self.workspace = workspace
@@ -63,6 +65,7 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self.opencode_config = opencode_config or OpenCodeServeConfig()
+        self.native_max_iterations = native_max_iterations
         self._running_tasks: dict[str, RunningTaskInfo] = {}
         self._session_tasks: dict[str, set[str]] = {}
 
@@ -177,10 +180,10 @@ class SubagentManager:
                 {"role": "user", "content": task},
             ]
 
-            max_iterations = 15
+            max_iterations = self.native_max_iterations
             iteration = 0
             final_result: str | None = None
-            
+
             # Use provided model or fall back to default
             effective_model = model or self.model
 
@@ -328,6 +331,7 @@ class SubagentManager:
                 path_append=self.exec_config.path_append,
             )
         )
+        tools.register(_NativeWebSearchTool())
         tools.register(WebFetchTool(proxy=self.web_proxy))
         return tools
 
@@ -505,3 +509,9 @@ Stay focused on the assigned task. Your final response will be reported back to 
             await client.aclose()
 
         return f"Context added to task {target.task_id}."
+
+
+class _NativeWebSearchTool(OpencodeSearchTool):
+    @property
+    def name(self) -> str:
+        return "web_search"

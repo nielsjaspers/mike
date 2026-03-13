@@ -372,6 +372,7 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         opencode_config=config.gateway.opencode,
+        research_config=config.research,
         save_config_callback=save_opencode_config,
     )
 
@@ -573,6 +574,7 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         opencode_config=config.gateway.opencode,
+        research_config=config.research,
         save_config_callback=save_opencode_config,
     )
 
