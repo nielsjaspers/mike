@@ -90,9 +90,10 @@ class OpencodeSearchTool(Tool):
 
         stdout, stderr, code = await self._run(cmd)
         if code != 0:
-            err = stderr.strip() or stdout.strip() or "opencode run failed"
+            err = stdout.strip() or stderr.strip() or "opencode run failed"
             return f"Error: {err}"
 
+        # Try to extract JSON from combined output
         text = stdout.strip()
         data = _extract_json(text)
         if data is None:
@@ -102,6 +103,11 @@ class OpencodeSearchTool(Tool):
 
     async def _run(self, cmd: list[str]) -> tuple[str, str, int | None]:
         try:
+            # Use --format json to get structured output that we can parse
+            if "--format" not in cmd:
+                cmd.insert(2, "json")  # Insert after "run"
+                cmd.insert(2, "--format")
+            
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -125,11 +131,54 @@ class OpencodeSearchTool(Tool):
 def _extract_json(text: str) -> dict[str, Any] | None:
     if not text:
         return None
+    
+    import re
+    
+    # Strip ANSI escape codes
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    
+    # Parse JSON events from opencode --format json output
+    # Look for tool_use events that contain web search results
+    results = []
+    for line in text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+            if event.get("type") == "tool_use":
+                part = event.get("part", {})
+                if part.get("tool") == "websearch" and part.get("state", {}).get("status") == "completed":
+                    output = part.get("state", {}).get("output", "")
+                    if output:
+                        # Parse the text output to extract individual results
+                        results.extend(_parse_websearch_output(output))
+            elif "results" in event:
+                # Direct JSON response
+                return event
+        except json.JSONDecodeError:
+            continue
+    
+    if results:
+        return {"results": results}
+    
+    # Fallback: try parsing the whole text as JSON
     try:
         data = json.loads(text)
         return data if isinstance(data, dict) else None
     except Exception:
         pass
+    
+    # Extract JSON from markdown code blocks
+    code_block_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if code_block_match:
+        try:
+            data = json.loads(code_block_match.group(1).strip())
+            return data if isinstance(data, dict) else None
+        except Exception:
+            pass
+    
+    # Extract bare JSON object
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -138,15 +187,29 @@ def _extract_json(text: str) -> dict[str, Any] | None:
             return data if isinstance(data, dict) else None
         except Exception:
             return None
-    start = text.find("[")
-    end = text.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        try:
-            data = json.loads(text[start : end + 1])
-            return {"results": data} if isinstance(data, list) else None
-        except Exception:
-            return None
+    
     return None
+
+
+def _parse_websearch_output(output: str) -> list[dict[str, str]]:
+    """Parse web search output text into structured results."""
+    results = []
+    import re
+    
+    # Split by "Title:" to get individual results
+    # Each result has: Title, Published Date, URL, Text
+    pattern = r"Title:\s*(.+?)\n(?:Published Date:\s*(.+?)\n)?(?:Author:\s*(.+?)\n)?URL:\s*(.+?)\nText:\s*(.+?)(?=\n\nTitle:|$)"
+    matches = re.findall(pattern, output, re.DOTALL)
+    
+    for match in matches:
+        title, published, author, url, text = match
+        results.append({
+            "title": title.strip(),
+            "url": url.strip(),
+            "snippet": text.strip()[:300] + "..." if len(text.strip()) > 300 else text.strip()
+        })
+    
+    return results
 
 
 def _is_truthy(val: str | None) -> bool:
