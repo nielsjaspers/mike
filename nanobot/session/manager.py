@@ -31,6 +31,7 @@ class Session:
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
     last_consolidated: int = 0  # Number of messages already consolidated to files
+    current_model: str | None = None  # User-selected model for this session (None = use default)
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
@@ -128,6 +129,7 @@ class SessionManager:
             metadata = {}
             created_at = None
             last_consolidated = 0
+            current_model = None
 
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -145,6 +147,7 @@ class SessionManager:
                             else None
                         )
                         last_consolidated = data.get("last_consolidated", 0)
+                        current_model = data.get("current_model")
                     else:
                         messages.append(data)
 
@@ -154,6 +157,7 @@ class SessionManager:
                 created_at=created_at or datetime.now(),
                 metadata=metadata,
                 last_consolidated=last_consolidated,
+                current_model=current_model,
             )
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
@@ -171,6 +175,7 @@ class SessionManager:
                 "updated_at": session.updated_at.isoformat(),
                 "metadata": session.metadata,
                 "last_consolidated": session.last_consolidated,
+                "current_model": session.current_model,
             }
             f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
             for msg in session.messages:

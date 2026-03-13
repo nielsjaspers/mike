@@ -78,6 +78,7 @@ class SubagentManager:
         origin_chat_id: str = "direct",
         session_key: str | None = None,
         use_opencode: bool | None = None,
+        model: str | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
         if use_opencode and not self.opencode_enabled:
@@ -90,7 +91,7 @@ class SubagentManager:
         runner = (
             self._run_opencode_task(task_id, task, display_label, origin)
             if backend == "opencode"
-            else self._run_native_subagent(task_id, task, display_label, origin)
+            else self._run_native_subagent(task_id, task, display_label, origin, model=model)
         )
         bg_task = asyncio.create_task(runner)
         info = RunningTaskInfo(
@@ -163,6 +164,7 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        model: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting native task: {}", task_id, label)
@@ -178,13 +180,16 @@ class SubagentManager:
             max_iterations = 15
             iteration = 0
             final_result: str | None = None
+            
+            # Use provided model or fall back to default
+            effective_model = model or self.model
 
             while iteration < max_iterations:
                 iteration += 1
                 response = await self.provider.chat_with_retry(
                     messages=messages,
                     tools=tools.get_definitions(),
-                    model=self.model,
+                    model=effective_model,
                 )
 
                 if response.has_tool_calls:

@@ -14,6 +14,24 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
+
+# Model registry for available models
+AVAILABLE_MODELS: dict[str, dict[str, Any]] = {
+    "kimi-k2.5": {
+        "vision": True,
+        "description": "Moonshot Kimi K2.5 — best overall performance with vision support",
+    },
+    "glm-5": {
+        "vision": False,
+        "description": "Zhipu GLM-5 — fast text-only model",
+    },
+    "minimax-m2.5": {
+        "vision": False,
+        "description": "MiniMax M2.5 — most cost effective (text-only)",
+    },
+}
+
+DEFAULT_MODEL = "kimi-k2.5"
 from nanobot.agent.memory import MemoryConsolidator
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
@@ -158,14 +176,19 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None, model: str | None = None) -> None:
         """Update context for all tools that need routing info."""
         for name in ("message", "spawn", "cron", "web_search", "opencode_delegate"):
             if tool := self.tools.get(name):
                 tool_obj = tool
                 setter = getattr(tool_obj, "set_context", None)
                 if callable(setter):
-                    setter(channel, chat_id, *([message_id] if name == "message" else []))
+                    if name == "message":
+                        setter(channel, chat_id, message_id)
+                    elif name == "spawn":
+                        setter(channel, chat_id, model)
+                    else:
+                        setter(channel, chat_id)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -191,12 +214,16 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        model: str | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        
+        # Use provided model or fall back to instance default
+        effective_model = model or self.model or DEFAULT_MODEL
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -206,7 +233,7 @@ class AgentLoop:
             response = await self.provider.chat_with_retry(
                 messages=messages,
                 tools=tool_defs,
-                model=self.model,
+                model=effective_model,
             )
 
             if response.has_tool_calls:
@@ -398,8 +425,9 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
+            effective_model = self._get_effective_model(session)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"), effective_model)
             history = session.get_history(max_messages=0)
             messages = self.context.build_messages(
                 history=history,
@@ -454,6 +482,9 @@ class AgentLoop:
                 "/stop — Stop the current task",
                 "/restart — Restart the bot",
                 "/help — Show available commands",
+                "/model — Show current model and available options",
+                "/model <name> — Switch to a different model for this session",
+                "/model reset — Reset to default model",
                 "/research <task> — Run a complex task with OpenCode Serve",
                 "/status — Show running background tasks",
                 "/context <text> — Add context to a running OpenCode task",
@@ -464,6 +495,11 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content="\n".join(lines),
             )
+        if cmd == "/model" or cmd.startswith("/model "):
+            return await self._handle_model_command(msg, session)
+        if cmd == "/models":
+            # Alias for /model
+            return await self._handle_model_command(msg, session)
         if cmd.startswith("/research"):
             task = msg.content[len("/research") :].strip()
             if not task:
@@ -506,7 +542,11 @@ class AgentLoop:
                 content="Usage: /research <task description>",
             )
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        # Determine model to use with vision fallback
+        effective_model = self._get_effective_model(session)
+        vision_fallback = False
+        
+        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), effective_model)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
@@ -536,7 +576,12 @@ class AgentLoop:
         final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
+            model=effective_model,
         )
+        
+        # Append vision fallback notice if applicable
+        if vision_fallback and final_content:
+            final_content = f"[Switched to {DEFAULT_MODEL} for image support]\n\n{final_content}"
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
@@ -555,6 +600,84 @@ class AgentLoop:
             chat_id=msg.chat_id,
             content=final_content,
             metadata=msg.metadata or {},
+        )
+
+    def _get_effective_model(self, session) -> str:
+        """Get the effective model for a session, falling back to default if needed."""
+        if session.current_model and session.current_model in AVAILABLE_MODELS:
+            return session.current_model
+        return self.model or DEFAULT_MODEL
+
+    def _has_vision_content(self, msg: InboundMessage) -> bool:
+        """Check if a message contains vision content (images)."""
+        if not msg.media:
+            return False
+        for item in msg.media:
+            if item.get("type") in ("image", "photo", "image_url"):
+                return True
+            if item.get("mime_type", "").startswith("image/"):
+                return True
+        return False
+
+    async def _handle_model_command(
+        self, msg: InboundMessage, session
+    ) -> OutboundMessage:
+        """Handle the /model command."""
+        parts = msg.content.strip().split(maxsplit=1)
+        
+        if len(parts) == 1:
+            # Just /model — show current and available
+            current = self._get_effective_model(session)
+            lines = [f"Current model: {current}"]
+            if session.current_model:
+                lines.append("(User-selected for this session)")
+            else:
+                lines.append("(Using default)")
+            lines.append("")
+            lines.append("Available models:")
+            for name, info in AVAILABLE_MODELS.items():
+                vision_badge = " [vision]" if info["vision"] else ""
+                marker = "→ " if name == current else "  "
+                lines.append(f"{marker}{name}{vision_badge} — {info['description']}")
+            lines.append("")
+            lines.append("Usage: /model <name> to switch, /model reset to restore default")
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="\n".join(lines),
+            )
+        
+        subcmd = parts[1].lower().strip()
+        
+        if subcmd == "reset":
+            old_model = self._get_effective_model(session)
+            session.current_model = None
+            self.sessions.save(session)
+            new_model = self._get_effective_model(session)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Model reset from {old_model} to default ({new_model}).",
+            )
+        
+        if subcmd in AVAILABLE_MODELS:
+            old_model = self._get_effective_model(session)
+            session.current_model = subcmd
+            self.sessions.save(session)
+            info = AVAILABLE_MODELS[subcmd]
+            vision_note = " Supports images." if info["vision"] else " Text-only."
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Model switched from {old_model} to {subcmd}.{vision_note}",
+            )
+        
+        # Unknown model
+        available = ", ".join(AVAILABLE_MODELS.keys())
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=f"Unknown model: '{subcmd}'. Available: {available}",
         )
 
     def _format_task_status(self, session_key: str) -> str:
