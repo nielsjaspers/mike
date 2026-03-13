@@ -32,7 +32,7 @@ class OpenCodeWebSearchTool(Tool):
     def description(self) -> str:
         return (
             "Search the web using OpenCode Serve's built-in web search harness. "
-            "This returns results asynchronously through a delegated OpenCode task instead of using Brave Search."
+            "This returns the actual search result text from OpenCode instead of using Brave Search."
         )
 
     @property

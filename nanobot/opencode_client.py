@@ -132,12 +132,10 @@ class OpencodeServeClient:
                 continue
             if not isinstance(part, dict):
                 continue
+            part_type = part.get("type")
             text = part.get("text")
-            if isinstance(text, str) and text.strip():
+            if part_type == "text" and isinstance(text, str) and text.strip():
                 texts.append(text.strip())
-            content = part.get("content")
-            if isinstance(content, str) and content.strip():
-                texts.append(content.strip())
             nested = part.get("parts")
             if isinstance(nested, list):
                 texts.extend(OpencodeServeClient._extract_text_parts(nested))

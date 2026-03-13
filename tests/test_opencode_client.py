@@ -25,3 +25,15 @@ def test_extract_text_falls_back_to_title() -> None:
     payload = {"info": {"title": "Result title"}, "parts": []}
 
     assert OpencodeServeClient.extract_text(payload) == "Result title"
+
+
+def test_extract_text_ignores_reasoning_parts() -> None:
+    payload = {
+        "info": {"id": "m1"},
+        "parts": [
+            {"type": "reasoning", "text": "I should search for this"},
+            {"type": "text", "text": "Actual answer"},
+        ],
+    }
+
+    assert OpencodeServeClient.extract_text(payload) == "Actual answer"

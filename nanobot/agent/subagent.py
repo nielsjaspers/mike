@@ -280,18 +280,31 @@ class SubagentManager:
         max_polls = 900
         for _ in range(max_polls):
             items = await client.list_messages(session_id)
-            if items:
-                for message in reversed(items):
-                    if not isinstance(message, dict):
-                        continue
-                    info = message.get("info") or {}
-                    if info.get("role") != "assistant":
-                        continue
-                    text = OpencodeServeClient.extract_text(message)
-                    if text:
-                        return text
+            assistants = []
+            for message in items:
+                if not isinstance(message, dict):
+                    continue
+                info = message.get("info") or {}
+                if info.get("role") == "assistant":
+                    assistants.append(message)
+
+            if assistants:
+                latest = assistants[-1]
+                info = latest.get("info") or {}
+                text = OpencodeServeClient.extract_text(latest)
+                if text:
+                    return text
+
+                finish = info.get("finish")
+                time_info = info.get("time") if isinstance(info, dict) else None
+                if finish not in (None, "tool-calls") and isinstance(time_info, dict):
+                    if time_info.get("completed") is not None:
+                        break
             await asyncio.sleep(2)
-        raise TimeoutError("OpenCode task timed out while waiting for a final assistant message")
+        raise RuntimeError(
+            "OpenCode task completed without a text result. "
+            "This usually means the session only produced reasoning or tool traces without a final answer."
+        )
 
     def _build_native_tools(self) -> ToolRegistry:
         tools = ToolRegistry()

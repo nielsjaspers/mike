@@ -73,6 +73,71 @@ async def test_opencode_task_waits_for_final_message(tmp_path, monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_opencode_task_waits_past_tool_call_assistant_messages(tmp_path) -> None:
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=MessageBus())
+    original_sleep = asyncio.sleep
+
+    client = MagicMock()
+    client.list_messages = AsyncMock(
+        side_effect=[
+            [
+                {
+                    "info": {"role": "assistant", "finish": "tool-calls", "time": {"completed": 1}},
+                    "parts": [{"type": "reasoning", "text": "searching"}],
+                }
+            ],
+            [
+                {
+                    "info": {"role": "assistant", "finish": "tool-calls", "time": {"completed": 1}},
+                    "parts": [{"type": "reasoning", "text": "searching"}],
+                },
+                {
+                    "info": {"role": "assistant", "finish": "stop", "time": {"completed": 2}},
+                    "parts": [{"type": "text", "text": "final answer"}],
+                },
+            ],
+        ]
+    )
+
+    async def fake_sleep(_: float) -> None:
+        await original_sleep(0)
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr("nanobot.agent.subagent.asyncio.sleep", fake_sleep)
+        result = await mgr._wait_for_opencode_result(client, "sess-1")
+
+    assert result == "final answer"
+
+
+@pytest.mark.asyncio
+async def test_opencode_task_rejects_reasoning_only_completion(tmp_path, monkeypatch) -> None:
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=MessageBus())
+    original_sleep = asyncio.sleep
+
+    client = MagicMock()
+    client.list_messages = AsyncMock(
+        return_value=[
+            {
+                "info": {"role": "assistant", "time": {"completed": 123}},
+                "parts": [{"type": "reasoning", "text": "I should search"}],
+            }
+        ]
+    )
+
+    async def fake_sleep(_: float) -> None:
+        await original_sleep(0)
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr("nanobot.agent.subagent.asyncio.sleep", fake_sleep)
+        with pytest.raises(RuntimeError, match="completed without a text result"):
+            await mgr._wait_for_opencode_result(client, "sess-1")
+
+
+@pytest.mark.asyncio
 async def test_run_opencode_task_announces_result(tmp_path, monkeypatch) -> None:
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
