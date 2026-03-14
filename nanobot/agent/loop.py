@@ -513,10 +513,19 @@ class AgentLoop:
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="New session started."
             )
+        if cmd == "/clear":
+            # Instant clear without memory archival - for quick one-offs
+            session.clear()
+            self.sessions.save(session)
+            self.sessions.invalidate(session.key)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content="Chat cleared. (no memory)"
+            )
         if cmd == "/help":
             lines = [
                 "🐈 nanobot commands:",
-                "/new — Start a new conversation",
+                "/new — Start a new conversation (with memory)",
+                "/clear — Clear chat instantly (no memory)",
                 "/stop — Stop the current task",
                 "/restart — Restart the bot",
                 "/help — Show available commands",
