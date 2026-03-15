@@ -58,10 +58,18 @@ class ArchiveManager:
         transcript = self._format_messages(session.messages)
         prompt = (
             "Archive this conversation for Mike. Respond ONLY with valid JSON. "
-            "The JSON must contain exactly these string keys: title, summary, memory_update. "
-            "The summary should be useful for later search and recall.\n\n"
-            f"## Current MEMORY.md\n{current_memory}\n\n"
-            f"## Conversation\n{transcript}"
+            "The JSON must contain exactly these string keys: title, summary, memory_update.\n\n"
+            "CRITICAL INSTRUCTION for memory_update:\n"
+            "- You are updating an existing MEMORY.md file, NOT replacing it\n"
+            "- The 'memory_update' field must contain the COMPLETE updated content of MEMORY.md\n"
+            "- PRESERVE all existing information from Current MEMORY.md below\n"
+            "- MERGE in new facts, project updates, and context from the conversation\n"
+            "- DO NOT remove or summarize away existing project details, preferences, or facts\n"
+            "- Add new information as new sections or integrate into existing sections\n"
+            "- If a project already exists, update its status; don't delete its history\n"
+            "- Err on the side of keeping information rather than condensing it\n\n"
+            f"## Current MEMORY.md (PRESERVE AND BUILD UPON THIS):\n{current_memory}\n\n"
+            f"## New Conversation to Archive (extract updates from this):\n{transcript}"
         )
         title, summary, memory_update = await self._summarize_archive(
             session=session,
