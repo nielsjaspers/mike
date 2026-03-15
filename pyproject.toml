@@ -66,8 +66,9 @@ dev = [
 ]
 
 [project.scripts]
-nanobot = "nanobot.cli.commands:app"
+nanoimport = "mike.app:main"
 mike = "mike.app:main"
+nanobot = "mike.app:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -77,25 +78,20 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["nanobot", "mike"]
+packages = ["mike"]
 
 [tool.hatch.build.targets.wheel.sources]
-"nanobot" = "nanobot"
 "mike" = "mike"
 
 # Include non-Python files in skills and templates
 [tool.hatch.build]
 include = [
-    "nanobot/**/*.py",
     "mike/**/*.py",
-    "nanobot/templates/**/*.md",
-    "nanobot/skills/**/*.md",
-    "nanobot/skills/**/*.sh",
+    "mike/resources/**/*.md",
 ]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "nanobot/",
     "mike/",
     "bridge/",
     "README.md",

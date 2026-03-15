@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from mike.chat.models import DEFAULT_MODEL
 from mike.config import MikeConfig
-from nanobot.providers.base import GenerationSettings, LLMProvider
-from nanobot.providers.custom_provider import CustomProvider
+from mike.custom_provider import CustomProvider
+from mike.llm import GenerationSettings, LLMProvider
 
 
 def make_provider(config: MikeConfig) -> LLMProvider:

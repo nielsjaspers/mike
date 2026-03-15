@@ -14,7 +14,7 @@ from mike.chat.models import clamp_max_tokens
 from mike.common import timestamp
 from mike.memory.search import load_index
 from mike.storage.chats import ChatSession, ChatStore
-from nanobot.providers.base import LLMProvider
+from mike.llm import LLMProvider
 
 ARCHIVE_TOOL = [
     {

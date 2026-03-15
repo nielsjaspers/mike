@@ -37,8 +37,8 @@ from mike.tools.research import ResearchTool
 from mike.tools.shell import ExecTool
 from mike.tools.web import WebFetchTool, WebSearchTool
 from mike.types import InboundMessage, OutboundMessage
-from nanobot.providers.base import LLMProvider
-from nanobot.utils.helpers import build_assistant_message, detect_image_mime
+from mike.helpers import build_assistant_message, detect_image_mime
+from mike.llm import LLMProvider
 
 
 class ContextBuilder:

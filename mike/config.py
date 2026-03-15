@@ -28,7 +28,7 @@ class MikeConfig(BaseModel):
     opencode_agent: str | None = None
 
     default_model: str = "kimi-k2.5"
-    data_dir: str = "~/.nanobot/mike"
+    data_dir: str = "~/.mike"
     project_root: str = "."
     send_progress: bool = True
     send_tool_hints: bool = False
@@ -39,7 +39,7 @@ class MikeConfig(BaseModel):
     restrict_shell_to_project: bool = False
 
     skills_dir: str = ".opencode/skills"
-    deep_research_skill_path: str = "nanobot/skills/deep-research/SKILL.md"
+    deep_research_skill_path: str = "mike/resources/deep-research/SKILL.md"
 
     @property
     def data_dir_path(self) -> Path:
@@ -58,7 +58,7 @@ def default_config_path() -> Path:
     override = os.environ.get("MIKE_CONFIG")
     if override:
         return Path(override).expanduser().resolve()
-    return Path.home() / ".nanobot" / "mike.json"
+    return Path.home() / ".mike" / "config.json"
 
 
 def default_config() -> MikeConfig:

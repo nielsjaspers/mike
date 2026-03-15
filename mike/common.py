@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from nanobot.utils.helpers import detect_image_mime, split_message
+from mike.helpers import detect_image_mime, split_message
 
 UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -20,8 +22,17 @@ from mike.tasks.manager import TaskManager
 from mike.tasks.research import ResearchManager
 from mike.telegram.bot import TelegramBot
 
-app = typer.Typer(name="mike", help="Mike - minimal nanobot rebuild")
+app = typer.Typer(name="mike", help="Mike - personal assistant bot")
 console = Console()
+
+
+async def _maybe_aclose(provider: Any) -> None:
+    close = getattr(provider, "aclose", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
 
 
 def build_runtime(config: MikeConfig):
@@ -63,9 +74,13 @@ def gateway(
     config_path: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override Mike data directory"),
 ):
-    config = load_config(Path(config_path).expanduser().resolve() if config_path else None)
+    path = Path(config_path).expanduser().resolve() if config_path else default_config_path()
+    config = load_config(path)
     if data_dir:
         config.data_dir = data_dir
+    if not path.exists():
+        save_config(config, path)
+        console.print(f"[green]OK[/green] Created config at {path}")
     console.print("Starting Mike gateway...")
 
     async def run() -> None:
@@ -88,9 +103,7 @@ def gateway(
             loop.stop()
             await telegram.stop()
             await server.stop()
-            close = getattr(provider, "aclose", None)
-            if callable(close):
-                await close()
+            await _maybe_aclose(provider)
 
     asyncio.run(run())
 
@@ -101,7 +114,11 @@ def agent(
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
     config_path: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    config = load_config(Path(config_path).expanduser().resolve() if config_path else None)
+    path = Path(config_path).expanduser().resolve() if config_path else default_config_path()
+    config = load_config(path)
+    if not path.exists():
+        save_config(config, path)
+        console.print(f"[green]OK[/green] Created config at {path}")
 
     async def run_once() -> None:
         _bus, loop, _telegram, server, provider = build_runtime(config)
@@ -112,9 +129,7 @@ def agent(
         finally:
             loop.stop()
             await server.stop()
-            close = getattr(provider, "aclose", None)
-            if callable(close):
-                await close()
+            await _maybe_aclose(provider)
 
     asyncio.run(run_once())
 
