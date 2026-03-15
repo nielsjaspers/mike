@@ -47,7 +47,7 @@ class TaskStore:
         self.data_dir = ensure_dir(data_dir)
 
     def root(self, task_id: str) -> Path:
-        return task_root(self.data_dir, task_id)
+        return ensure_dir(self.data_dir / task_id)
 
     def snapshot_path(self, task_id: str) -> Path:
         return self.root(task_id) / "task.json"
@@ -91,7 +91,15 @@ class TaskStore:
                 items.append(TaskRecord.from_dict(json.loads(path.read_text(encoding="utf-8"))))
             except Exception:
                 continue
-        return sorted(items, key=lambda item: item.updated_at, reverse=True)
+        legacy_root = self.data_dir / "tasks"
+        if legacy_root.exists():
+            for path in legacy_root.glob("*/task.json"):
+                try:
+                    items.append(TaskRecord.from_dict(json.loads(path.read_text(encoding="utf-8"))))
+                except Exception:
+                    continue
+        deduped: dict[str, TaskRecord] = {item.task_id: item for item in items}
+        return sorted(deduped.values(), key=lambda item: item.updated_at, reverse=True)
 
     def write_artifact(self, task_id: str, name: str, content: str) -> str:
         path = self.artifacts_dir(task_id) / name
