@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import os
 
+from loguru import logger
+
 from mike.config import MikeConfig
 from mike.opencode.client import OpencodeClient
 
@@ -17,8 +19,15 @@ class OpencodeServer:
 
     async def ensure_running(self) -> None:
         if await self.is_healthy():
+            logger.info(
+                "Mike attached to existing OpenCode server at {}", self.config.opencode_server_url
+            )
             return
         if not self.config.opencode_server_autostart:
+            logger.warning(
+                "OpenCode server at {} is unavailable and autostart is disabled",
+                self.config.opencode_server_url,
+            )
             return
         if self.proc and self.proc.returncode is None:
             return
@@ -35,6 +44,10 @@ class OpencodeServer:
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+        )
+        logger.info(
+            "Mike started a new OpenCode server at {}",
+            self.config.opencode_server_url,
         )
         for _ in range(30):
             if await self.is_healthy():

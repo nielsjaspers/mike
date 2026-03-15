@@ -1,19 +1,12 @@
-"""Helpers for explicit HISTORY.md usage."""
+"""Compatibility helpers for structured history archives."""
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
+
+from mike.memory.search import search_index
 
 
 def search_history(path: Path, query: str, limit: int = 20) -> list[str]:
-    if not path.exists() or not query.strip():
-        return []
-    regex = re.compile(re.escape(query), re.IGNORECASE)
-    matches: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if regex.search(line):
-            matches.append(line)
-        if len(matches) >= limit:
-            break
-    return matches
+    matches = search_index(path, query, limit=limit)
+    return [f"{match.archive_id}: {match.title} - {match.summary}" for match in matches]

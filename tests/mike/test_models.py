@@ -1,4 +1,4 @@
-from mike.chat.models import get_model
+from mike.chat.models import clamp_max_tokens, get_model
 from mike.chat.reasoning import build_reasoning_kwargs
 from mike.tasks.research import build_opencode_reasoning_config
 
@@ -34,21 +34,26 @@ def test_minimax_uses_anthropic_transport_and_budget():
     assert cfg["endpoint"] == "/messages"
     assert cfg["auth_header"] == "x-api-key"
     assert cfg["reasoning_param"] == "thinking"
-    reasoning = build_reasoning_kwargs("minimax-m2.5", 16000)
+    reasoning = build_reasoning_kwargs("minimax-m2.5")
     assert reasoning["reasoning_effort"] is None
-    assert reasoning["thinking"] == {"type": "enabled", "budget_tokens": 16000}
+    assert reasoning["thinking"] == {"type": "enabled"}
 
 
 def test_opencode_reasoning_config_mapping():
-    assert build_opencode_reasoning_config("kimi-k2.5", 16000) == {
+    assert build_opencode_reasoning_config("kimi-k2.5") == {
         "type": "reasoning_effort",
         "value": "high",
     }
-    assert build_opencode_reasoning_config("glm-5", 16000) == {
+    assert build_opencode_reasoning_config("glm-5") == {
         "type": "reasoning_effort",
         "value": "high",
     }
-    assert build_opencode_reasoning_config("minimax-m2.5", 16000) == {
+    assert build_opencode_reasoning_config("minimax-m2.5") == {
         "type": "thinking",
-        "budgetTokens": 16000,
     }
+
+
+def test_model_max_tokens_are_clamped_safely():
+    assert clamp_max_tokens("minimax-m2.5", 250000) == 196000
+    assert clamp_max_tokens("kimi-k2.5", 300000) == 260000
+    assert clamp_max_tokens("glm-5", 250000) == 202000

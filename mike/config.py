@@ -28,8 +28,6 @@ class MikeConfig(BaseModel):
     opencode_agent: str | None = None
 
     default_model: str = "kimi-k2.5"
-    minimax_budget_tokens: int | None = 16000
-
     data_dir: str = "~/.nanobot/mike"
     project_root: str = "."
     send_progress: bool = True
@@ -73,6 +71,7 @@ def load_config(path: Path | None = None) -> MikeConfig:
         return default_config()
     with path.open(encoding="utf-8") as handle:
         data = json.load(handle)
+    data.pop("minimax_budget_tokens", None)
     return MikeConfig.model_validate(data)
 
 

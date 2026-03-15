@@ -19,7 +19,8 @@ def build_system_prompt(chat_root: Path, skills_summary: str = "") -> str:
         "You are Mike, a focused personal assistant bot.",
         f"Current local time: {now}",
         "Use native tool calls for normal work. Use OpenCode delegation only for large code tasks or research.",
-        "`HISTORY.md` is an archive. Do not assume it is loaded into context unless you intentionally read or search it.",
+        "Shared memory and archived chat history are not loaded into context automatically.",
+        "Use the memory/history tools only when you actually need durable recall from past conversations.",
         "If a skill is relevant, read its `SKILL.md` file before using it.",
     ]
     if soul:

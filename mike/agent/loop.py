@@ -14,7 +14,13 @@ from typing import Any, Awaitable, Callable
 from loguru import logger
 
 from mike.bus import MessageBus
-from mike.chat.models import DEFAULT_MODEL, SUPPORTED_MODELS, model_supports_vision
+from mike.memory.archive import ArchiveManager
+from mike.chat.models import (
+    DEFAULT_MODEL,
+    SUPPORTED_MODELS,
+    clamp_max_tokens,
+    model_supports_vision,
+)
 from mike.chat.prompts import build_system_prompt
 from mike.chat.reasoning import build_reasoning_kwargs
 from mike.config import MikeConfig
@@ -23,6 +29,8 @@ from mike.storage.chats import ChatSession, ChatStore
 from mike.tasks.research import ResearchManager
 from mike.tools.delegate import OpenCodeDelegateTool
 from mike.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from mike.tools.history import GetHistoryConversationTool, SearchHistoryTool
+from mike.tools.memory import ReadMemoryTool
 from mike.tools.message import MessageTool
 from mike.tools.registry import ToolRegistry
 from mike.tools.research import ResearchTool
@@ -40,7 +48,7 @@ class ContextBuilder:
         self.store = store
 
     def build_system_prompt(self, session_key: str) -> str:
-        root = self.store.root(session_key)
+        root = self.store.shared_root
         return build_system_prompt(root, skills_summary=build_summary(root))
 
     @staticmethod
@@ -153,6 +161,7 @@ class AgentLoop:
         self.research = research
         self.model = config.default_model or DEFAULT_MODEL
         self.context = ContextBuilder(store)
+        self.archiver = ArchiveManager(store, provider, self._get_effective_model)
         self.tools = ToolRegistry()
         self._running = False
         self._processing_lock = asyncio.Lock()
@@ -181,6 +190,9 @@ class AgentLoop:
             )
         )
         self.tools.register(WebFetchTool(proxy=self.config.telegram_proxy))
+        self.tools.register(ReadMemoryTool(self.store.memory_path))
+        self.tools.register(SearchHistoryTool(self.store.history_index_path))
+        self.tools.register(GetHistoryConversationTool(self.store.history_record_path))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(OpenCodeDelegateTool(manager=self.research))
         self.tools.register(ResearchTool(manager=self.research))
@@ -311,13 +323,15 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
         effective_model = model or self.model or DEFAULT_MODEL
-        reasoning = build_reasoning_kwargs(effective_model, self.config.minimax_budget_tokens)
+        reasoning = build_reasoning_kwargs(effective_model)
+        max_tokens = clamp_max_tokens(effective_model, self.config.max_tokens)
         while iteration < self.config.max_tool_iterations:
             iteration += 1
             response = await self.provider.chat_with_retry(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=effective_model,
+                max_tokens=max_tokens,
                 thinking=reasoning.get("thinking"),
                 reasoning_effort=reasoning.get("reasoning_effort"),
             )
@@ -384,16 +398,33 @@ class AgentLoop:
         session = self.store.get(key)
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            session.clear()
-            self.store.save(session)
+            if not session.has_meaningful_content():
+                session.clear()
+                self.store.save(session)
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id, content="New session started."
+                )
+            try:
+                archived = await self.archiver.archive_session(
+                    session, channel=msg.channel, chat_id=msg.chat_id
+                )
+            except Exception as exc:
+                logger.exception("Failed to archive session {}", key)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"Archiving failed, session not cleared. {exc}",
+                )
+            session = self.store.reset(key)
             return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content="New session started."
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Conversation archived as '{archived.title}' and new session started.",
             )
         if cmd == "/clear":
-            session.clear()
-            self.store.save(session)
+            session = self.store.reset(key)
             return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content="Chat cleared. (no memory)"
+                channel=msg.channel, chat_id=msg.chat_id, content="Chat cleared."
             )
         if cmd == "/help":
             lines = [
@@ -489,8 +520,6 @@ class AgentLoop:
         final_content = final_content or "I've completed processing but have no response to give."
         self._save_turn(session, all_msgs, 1 + len(history))
         self.store.save(session)
-        self.store.append_history(key, f"user: {msg.content}")
-        self.store.append_history(key, f"assistant: {final_content}")
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
             return None
         return OutboundMessage(

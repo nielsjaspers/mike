@@ -17,16 +17,10 @@ from mike.tasks.manager import TaskManager
 from mike.types import InboundMessage, OutboundMessage
 
 
-def build_opencode_reasoning_config(
-    model: str, minimax_budget_tokens: int | None
-) -> dict[str, str | int] | None:
-    policy = build_reasoning_kwargs(model, minimax_budget_tokens)
+def build_opencode_reasoning_config(model: str) -> dict[str, str | int] | None:
+    policy = build_reasoning_kwargs(model)
     if policy.get("thinking"):
-        thinking = policy["thinking"] or {}
-        result: dict[str, str | int] = {"type": "thinking"}
-        if isinstance(thinking, dict) and thinking.get("budget_tokens") is not None:
-            result["budgetTokens"] = int(thinking["budget_tokens"])
-        return result
+        return {"type": "thinking"}
     effort = policy.get("reasoning_effort")
     if not effort:
         return None
@@ -101,7 +95,7 @@ class ResearchManager:
                 model_id=task.model,
                 agent=self.config.opencode_agent,
                 reasoning_config=build_opencode_reasoning_config(
-                    task.model or self.config.default_model, self.config.minimax_budget_tokens
+                    task.model or self.config.default_model
                 ),
             )
             await self._poll_until_done(task, client)
@@ -191,7 +185,7 @@ class ResearchManager:
                 agent=self.config.opencode_agent,
                 no_reply=True,
                 reasoning_config=build_opencode_reasoning_config(
-                    task.model or self.config.default_model, self.config.minimax_budget_tokens
+                    task.model or self.config.default_model
                 ),
             )
         finally:
