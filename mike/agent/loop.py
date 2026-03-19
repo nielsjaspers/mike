@@ -146,7 +146,7 @@ class ContextBuilder:
 class AgentLoop:
     _TOOL_RESULT_MAX_CHARS = 16_000
     _MODEL_ALIASES = {
-        "minimax": "minimax-m2.5",
+        "minimax": "minimax-m2.7",
         "kimi": "kimi-k2.5",
         "glm": "glm-5",
     }

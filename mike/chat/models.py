@@ -38,6 +38,17 @@ SUPPORTED_MODELS: dict[str, dict[str, Any]] = {
         "reasoning_param": "thinking",
         "reasoning_value": {"type": "enabled"},
     },
+    "minimax-m2.7": {
+        "vision": False,
+        "description": "MiniMax M2.7 - anthropic-compatible reasoning model",
+        "api_type": "anthropic-compatible",
+        "max_output_tokens": 196000,
+        "endpoint": "/messages",
+        "auth_header": "x-api-key",
+        "auth_prefix": "",
+        "reasoning_param": "thinking",
+        "reasoning_value": {"type": "enabled"},
+    },
 }
 
 DEFAULT_MODEL = "kimi-k2.5"
