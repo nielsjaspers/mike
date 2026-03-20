@@ -34,7 +34,7 @@ class CustomProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int | None = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
@@ -70,7 +70,7 @@ class CustomProvider(LLMProvider):
         model_id: str,
         model_config: dict[str, Any],
         tools: list[dict[str, Any]] | None,
-        max_tokens: int,
+        max_tokens: int | None,
         temperature: float,
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
@@ -88,9 +88,10 @@ class CustomProvider(LLMProvider):
         body: dict[str, Any] = {
             "model": model_id,
             "messages": self._prepare_messages_openai(messages),
-            "max_tokens": max(1, max_tokens),
             "temperature": temperature,
         }
+        if max_tokens is not None:
+            body["max_tokens"] = max(1, max_tokens)
         if reasoning_effort:
             body[reasoning_param] = reasoning_effort
         elif reasoning_value:
@@ -117,7 +118,7 @@ class CustomProvider(LLMProvider):
         model_id: str,
         model_config: dict[str, Any],
         tools: list[dict[str, Any]] | None,
-        max_tokens: int,
+        max_tokens: int | None,
         thinking: dict[str, Any] | None,
         tool_choice: str | dict[str, Any] | None,
     ) -> LLMResponse:
@@ -137,7 +138,7 @@ class CustomProvider(LLMProvider):
         body: dict[str, Any] = {
             "model": model_id,
             "messages": chat_messages,
-            "max_tokens": max(1, max_tokens),
+            "max_tokens": max(1, max_tokens or 127000),
         }
         if system_prompt:
             body["system"] = system_prompt

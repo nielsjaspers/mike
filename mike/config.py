@@ -33,10 +33,15 @@ class MikeConfig(BaseModel):
     send_progress: bool = True
     send_tool_hints: bool = False
     max_tool_iterations: int = 24
-    max_tokens: int = 8192
+    max_tokens: int = 127000
     temperature: float = 1.0
     command_timeout: int = 120
     restrict_shell_to_project: bool = False
+
+    nocturne_enabled: bool = True
+    nocturne_time: str = "03:00"
+    nocturne_telegram_chat_id: str = ""
+    nocturne_model: str | None = None
 
     skills_dir: str = ".opencode/skills"
     deep_research_skill_path: str = "mike/resources/deep-research/SKILL.md"

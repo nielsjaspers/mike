@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+DEFAULT_ANTHROPIC_MAX_TOKENS = 127000
+
 SUPPORTED_MODELS: dict[str, dict[str, Any]] = {
     "kimi-k2.5": {
         "vision": True,
@@ -62,7 +64,15 @@ def model_supports_vision(model_id: str) -> bool:
     return bool((get_model(model_id) or {}).get("vision"))
 
 
-def clamp_max_tokens(model_id: str, requested: int) -> int:
+def clamp_max_tokens(model_id: str, requested: int) -> int | None:
     cfg = get_model(model_id) or {}
-    limit = int(cfg.get("max_output_tokens") or requested or 8192)
+    api_type = str(cfg.get("api_type") or "")
+    max_output = cfg.get("max_output_tokens")
+    limit = int(max_output) if max_output else DEFAULT_ANTHROPIC_MAX_TOKENS
+    if api_type == "openai-compatible":
+        if requested <= 0 or requested == DEFAULT_ANTHROPIC_MAX_TOKENS:
+            return None
+        return max(1, min(requested, limit))
+    if requested <= 0 or requested == DEFAULT_ANTHROPIC_MAX_TOKENS:
+        return limit
     return max(1, min(requested, limit))

@@ -54,7 +54,7 @@ class LLMResponse:
 @dataclass(frozen=True)
 class GenerationSettings:
     temperature: float = 0.7
-    max_tokens: int = 4096
+    max_tokens: int | None = 4096
     reasoning_effort: str | None = None
 
 
@@ -129,7 +129,7 @@ class LLMProvider(ABC):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int | None = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
@@ -147,18 +147,22 @@ class LLMProvider(ABC):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: object = _SENTINEL,
-        temperature: object = _SENTINEL,
-        reasoning_effort: object = _SENTINEL,
+        max_tokens: int | None | object = _SENTINEL,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         thinking: dict[str, Any] | None = None,
     ) -> LLMResponse:
         if max_tokens is self._SENTINEL:
-            max_tokens = self.generation.max_tokens
-        if temperature is self._SENTINEL:
-            temperature = self.generation.temperature
-        if reasoning_effort is self._SENTINEL:
-            reasoning_effort = self.generation.reasoning_effort
+            resolved_max_tokens: int | None = self.generation.max_tokens
+        elif max_tokens is None or isinstance(max_tokens, int):
+            resolved_max_tokens = max_tokens
+        else:
+            resolved_max_tokens = self.generation.max_tokens
+        resolved_temperature = self.generation.temperature if temperature is None else temperature
+        resolved_reasoning_effort = (
+            self.generation.reasoning_effort if reasoning_effort is None else reasoning_effort
+        )
 
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
             try:
@@ -166,9 +170,9 @@ class LLMProvider(ABC):
                     messages=messages,
                     tools=tools,
                     model=model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    reasoning_effort=reasoning_effort,
+                    max_tokens=resolved_max_tokens,
+                    temperature=resolved_temperature,
+                    reasoning_effort=resolved_reasoning_effort,
                     tool_choice=tool_choice,
                     thinking=thinking,
                 )
@@ -195,9 +199,9 @@ class LLMProvider(ABC):
                 messages=messages,
                 tools=tools,
                 model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
+                max_tokens=resolved_max_tokens,
+                temperature=resolved_temperature,
+                reasoning_effort=resolved_reasoning_effort,
                 tool_choice=tool_choice,
                 thinking=thinking,
             )

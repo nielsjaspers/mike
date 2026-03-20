@@ -8,3 +8,6 @@ def test_config_defaults_are_minimal_and_easy():
     assert cfg.opencode_server_url == "http://127.0.0.1:4096"
     assert cfg.default_model == "kimi-k2.5"
     assert cfg.opencode_server_autostart is True
+    assert cfg.max_tokens == 127000
+    assert cfg.nocturne_enabled is True
+    assert cfg.nocturne_time == "03:00"

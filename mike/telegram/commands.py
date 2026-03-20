@@ -14,4 +14,6 @@ COMMANDS = [
     "research",
     "status",
     "context",
+    "write",
+    "story",
 ]

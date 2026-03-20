@@ -10,7 +10,12 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip() if path.exists() else ""
 
 
-def build_system_prompt(chat_root: Path, skills_summary: str = "") -> str:
+def build_system_prompt(
+    chat_root: Path,
+    skills_summary: str = "",
+    creative_soul: str = "",
+    creative_mode: bool = False,
+) -> str:
     soul = _read(chat_root / "SOUL.md")
     user = _read(chat_root / "USER.md")
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -23,10 +28,12 @@ def build_system_prompt(chat_root: Path, skills_summary: str = "") -> str:
         "Use the memory/history tools only when you actually need durable recall from past conversations.",
         "If a skill is relevant, read its `SKILL.md` file before using it.",
     ]
-    if soul:
+    if soul and not creative_mode:
         parts.extend(["", "## SOUL", soul])
     if user:
         parts.extend(["", "## USER", user])
+    if creative_soul:
+        parts.extend(["", "## CREATIVE SOUL", creative_soul])
     if skills_summary:
         parts.extend(["", "## Skills", skills_summary])
     return "\n".join(parts)

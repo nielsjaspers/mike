@@ -21,6 +21,8 @@ from mike.storage.tasks import TaskStore
 from mike.tasks.manager import TaskManager
 from mike.tasks.research import ResearchManager
 from mike.telegram.bot import TelegramBot
+from mike.writing.manager import WritingManager
+from mike.writing.store import WritingStore
 
 app = typer.Typer(name="mike", help="Mike - personal assistant bot")
 console = Console()
@@ -44,9 +46,12 @@ def build_runtime(config: MikeConfig):
     research = ResearchManager(config, bus, task_store, task_manager)
     provider = make_provider(config)
     loop = AgentLoop(bus=bus, provider=provider, config=config, store=store, research=research)
+    writing_store = WritingStore(config.data_dir_path / "writing")
+    writing = WritingManager(config=config, bus=bus, store=writing_store, agent_loop=loop)
+    loop.writing = writing
     telegram = TelegramBot(config, bus, store)
     server = OpencodeServer(config)
-    return bus, loop, telegram, server, provider
+    return bus, loop, telegram, server, provider, writing
 
 
 @app.command()
@@ -84,7 +89,7 @@ def gateway(
     console.print("Starting Mike gateway...")
 
     async def run() -> None:
-        bus, loop, telegram, server, provider = build_runtime(config)
+        bus, loop, telegram, server, provider, writing = build_runtime(config)
         try:
             await server.ensure_running()
             console.print(f"[green]OK[/green] OpenCode Serve: {config.opencode_server_url}")
@@ -95,12 +100,15 @@ def gateway(
                     "[yellow]Warning[/yellow] Telegram token missing; bot will not receive messages"
                 )
             tasks = [asyncio.create_task(loop.run())]
+            if config.nocturne_enabled:
+                tasks.append(asyncio.create_task(writing.start()))
             if config.telegram_enabled:
                 tasks.append(asyncio.create_task(telegram.start()))
                 tasks.append(asyncio.create_task(telegram.bridge_outbound()))
             await asyncio.gather(*tasks)
         finally:
             loop.stop()
+            writing.stop()
             await telegram.stop()
             await server.stop()
             await _maybe_aclose(provider)
@@ -121,13 +129,14 @@ def agent(
         console.print(f"[green]OK[/green] Created config at {path}")
 
     async def run_once() -> None:
-        _bus, loop, _telegram, server, provider = build_runtime(config)
+        _bus, loop, _telegram, server, provider, writing = build_runtime(config)
         try:
             await server.ensure_running()
             response = await loop.process_direct(message or "Hello", session_key=session_id)
             console.print(response)
         finally:
             loop.stop()
+            writing.stop()
             await server.stop()
             await _maybe_aclose(provider)
 

@@ -18,6 +18,24 @@ DEFAULT_MEMORY = (
     "## Project Context\n\n(Information about ongoing projects)\n\n"
     "## Important Notes\n\n(Things to remember)\n"
 )
+DEFAULT_CREATIVE_SOUL = (
+    "# CREATIVE SOUL\n\n"
+    "You are Mike's creative voice - distinct from your everyday assistant persona.\n\n"
+    "## Voice\n"
+    "- Literary but accessible.\n"
+    "- Prefer concrete images over abstractions.\n"
+    "- Use rhythm intentionally.\n"
+    "- Never explain your own writing.\n\n"
+    "## Boundaries\n"
+    "- No fanfiction of existing IP.\n"
+    "- No gratuitous violence or explicit content.\n"
+    "- Avoid cliches; prefer fresh metaphors.\n\n"
+    "## Modes\n"
+    "- Poetry: image-rich, controlled form.\n"
+    "- Philosophy: concrete thought, lived experience.\n"
+    "- Tech speculation: grounded extrapolation.\n"
+    "- Fiction: character-driven momentum.\n"
+)
 
 
 def ensure_root(config: MikeConfig) -> Path:
@@ -28,6 +46,9 @@ def ensure_root(config: MikeConfig) -> Path:
     ensure_dir(root / "tasks")
     ensure_dir(root / "logs")
     ensure_dir(root / "skills")
+    ensure_dir(root / "writing")
+    ensure_dir(root / "writing" / "works")
+    ensure_dir(root / "writing" / "stories")
     ensure_shared_files(root)
     seed_research_skill(config, root)
     return root
@@ -38,6 +59,7 @@ def ensure_shared_files(root: Path) -> None:
         "SOUL.md": DEFAULT_SOUL,
         "USER.md": DEFAULT_USER,
         "MEMORY.md": DEFAULT_MEMORY,
+        "CREATIVE_SOUL.md": DEFAULT_CREATIVE_SOUL,
     }
     for name, content in files.items():
         path = root / name

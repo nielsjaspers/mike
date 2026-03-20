@@ -47,9 +47,20 @@ class ContextBuilder:
     def __init__(self, store: ChatStore):
         self.store = store
 
-    def build_system_prompt(self, session_key: str) -> str:
+    def build_system_prompt(self, session_key: str, creative: bool = False) -> str:
+        del session_key
         root = self.store.shared_root
-        return build_system_prompt(root, skills_summary=build_summary(root))
+        creative_soul = ""
+        if creative:
+            creative_path = root / "CREATIVE_SOUL.md"
+            if creative_path.exists():
+                creative_soul = creative_path.read_text(encoding="utf-8").strip()
+        return build_system_prompt(
+            root,
+            skills_summary=build_summary(root),
+            creative_soul=creative_soul,
+            creative_mode=creative,
+        )
 
     @staticmethod
     def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
@@ -67,6 +78,7 @@ class ContextBuilder:
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        creative: bool = False,
     ) -> list[dict[str, Any]]:
         runtime = self._build_runtime_context(channel, chat_id)
         user_content = self._build_user_content(current_message, media)
@@ -75,7 +87,7 @@ class ContextBuilder:
         else:
             merged = [{"type": "text", "text": runtime}] + user_content
         return [
-            {"role": "system", "content": self.build_system_prompt(session_key)},
+            {"role": "system", "content": self.build_system_prompt(session_key, creative=creative)},
             *history,
             {"role": "user", "content": merged},
         ]
@@ -158,6 +170,7 @@ class AgentLoop:
         config: MikeConfig,
         store: ChatStore,
         research: ResearchManager,
+        writing: Any | None = None,
     ):
         self.bus = bus
         self.provider = provider
@@ -168,6 +181,7 @@ class AgentLoop:
         self.context = ContextBuilder(store)
         self.archiver = ArchiveManager(store, provider, self._get_effective_model)
         self.tools = ToolRegistry()
+        self.writing = writing
         self._running = False
         self._processing_lock = asyncio.Lock()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}
@@ -219,10 +233,11 @@ class AgentLoop:
             task = asyncio.create_task(self._dispatch(msg))
             self._active_tasks.setdefault(msg.session_key, []).append(task)
             task.add_done_callback(
-                lambda t, key=msg.session_key: self._active_tasks.get(key, [])
-                and self._active_tasks[key].remove(t)
-                if t in self._active_tasks.get(key, [])
-                else None
+                lambda t, key=msg.session_key: (
+                    self._active_tasks.get(key, []) and self._active_tasks[key].remove(t)
+                    if t in self._active_tasks.get(key, [])
+                    else None
+                )
             )
 
     def stop(self) -> None:
@@ -445,6 +460,10 @@ class AgentLoop:
                 "/research <task> - Run a background research task",
                 "/status - Show running background tasks",
                 "/context <text> - Add context to a running task",
+                "/write <directive> - Write a creative piece now",
+                "/story list - List active story projects",
+                "/story start <directive> - Start a chaptered story",
+                "/story next <story_id> - Write next chapter",
             ]
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines)
@@ -482,8 +501,59 @@ class AgentLoop:
                 )
             result = await self.research.inject_context(key, extra)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+        if cmd.startswith("/write"):
+            if not self.writing:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Writing mode is not available.",
+                )
+            directive = msg.content[len("/write") :].strip()
+            result = await self.writing.write_on_demand(directive, key, msg.channel, msg.chat_id)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+        if cmd.startswith("/story"):
+            if not self.writing:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Story mode is not available.",
+                )
+            parts = msg.content.strip().split(maxsplit=2)
+            if len(parts) == 1 or parts[1].lower() == "list":
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self.writing.format_story_list(),
+                )
+            action = parts[1].lower()
+            if action == "start":
+                directive = parts[2] if len(parts) > 2 else ""
+                result = await self.writing.start_story(directive, key, msg.channel, msg.chat_id)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+            if action == "next":
+                story_id = parts[2].strip() if len(parts) > 2 else ""
+                if not story_id:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="Usage: /story next <story_id>",
+                    )
+                result = await self.writing.continue_story(story_id, key, msg.channel, msg.chat_id)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Usage: /story list | /story start <directive> | /story next <story_id>",
+            )
 
-        effective_model = self._get_effective_model(session)
+        creative = bool((msg.metadata or {}).get("_creative_soul"))
+
+        model_override = (msg.metadata or {}).get("_model_override")
+        effective_model = (
+            model_override
+            if isinstance(model_override, str) and model_override in SUPPORTED_MODELS
+            else self._get_effective_model(session)
+        )
         if self._has_vision_content(msg) and not model_supports_vision(effective_model):
             return OutboundMessage(
                 channel=msg.channel,
@@ -505,6 +575,7 @@ class AgentLoop:
             media=msg.media or None,
             channel=msg.channel,
             chat_id=msg.chat_id,
+            creative=creative,
         )
 
         async def bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -628,13 +699,21 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        creative: bool = False,
+        model: str | None = None,
     ) -> str:
+        metadata: dict[str, Any] = {}
+        if creative:
+            metadata["_creative_soul"] = True
+        if model:
+            metadata["_model_override"] = model
         msg = InboundMessage(
             channel=channel,
             sender_id="user",
             chat_id=chat_id,
             content=content,
             session_key_override=session_key,
+            metadata=metadata,
         )
         response = await self._process_message(
             msg, session_key=session_key, on_progress=on_progress

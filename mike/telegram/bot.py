@@ -33,6 +33,8 @@ class TelegramBot:
         BotCommand("research", "Run a complex research task"),
         BotCommand("status", "Show running background tasks"),
         BotCommand("context", "Add context to a running task"),
+        BotCommand("write", "Write a creative piece now"),
+        BotCommand("story", "Manage chaptered stories"),
     ]
 
     def __init__(self, config: MikeConfig, bus: MessageBus, store: ChatStore):
@@ -80,7 +82,18 @@ class TelegramBot:
         self._app.add_error_handler(self._on_error)
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("help", self._on_help))
-        for name in ("new", "clear", "stop", "restart", "model", "research", "status", "context"):
+        for name in (
+            "new",
+            "clear",
+            "stop",
+            "restart",
+            "model",
+            "research",
+            "status",
+            "context",
+            "write",
+            "story",
+        ):
             self._app.add_handler(CommandHandler(name, self._forward_command))
         self._app.add_handler(
             MessageHandler(
@@ -211,6 +224,8 @@ class TelegramBot:
             "/research - Run a complex task in OpenCode\n"
             "/status - Show running background tasks\n"
             "/context - Add context to a running task\n"
+            "/write - Write a creative piece now\n"
+            "/story - Story mode commands\n"
             "/restart - Restart the bot\n"
             "/help - Show available commands"
         )
