@@ -185,6 +185,11 @@ class AgentLoop:
         self._running = False
         self._processing_lock = asyncio.Lock()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}
+        self._attached_mode: dict[str, bool] = {}
+        self._context_offsets: dict[str, int] = {}
+        self._save_queue: asyncio.Queue[tuple[str, str, str, int]] = asyncio.Queue()
+        self._save_revisions: dict[str, int] = {}
+        self._save_worker: asyncio.Task | None = None
         self._register_tools()
 
     def _register_tools(self) -> None:
@@ -218,6 +223,7 @@ class AgentLoop:
 
     async def run(self) -> None:
         self._running = True
+        self._ensure_save_worker()
         while self._running:
             try:
                 msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
@@ -242,6 +248,8 @@ class AgentLoop:
 
     def stop(self) -> None:
         self._running = False
+        if self._save_worker and not self._save_worker.done():
+            self._save_worker.cancel()
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         tasks = self._active_tasks.pop(msg.session_key, [])
@@ -251,7 +259,9 @@ class AgentLoop:
                 await task
             except Exception:
                 pass
-        research_cancelled = await self.research.cancel_by_session(msg.session_key)
+        runtime_key = msg.session_key
+        active_session_id = self.store.resolve_active_session(runtime_key)
+        research_cancelled = await self.research.cancel_by_session(active_session_id)
         total = cancelled + research_cancelled
         await self.bus.publish_outbound(
             OutboundMessage(
@@ -332,6 +342,164 @@ class AgentLoop:
 
         return ", ".join(fmt(call) for call in tool_calls)
 
+    def _ensure_save_worker(self) -> None:
+        if self._save_worker and not self._save_worker.done():
+            return
+        self._save_worker = asyncio.create_task(self._save_worker_loop())
+
+    def _touch_revision(self, session_id: str) -> int:
+        revision = self._save_revisions.get(session_id, 0) + 1
+        self._save_revisions[session_id] = revision
+        return revision
+
+    async def _enqueue_background_save(self, session_id: str, channel: str, chat_id: str) -> None:
+        self._ensure_save_worker()
+        revision = self._touch_revision(session_id)
+        await self._save_queue.put((session_id, channel, chat_id, revision))
+
+    async def _save_worker_loop(self) -> None:
+        while True:
+            try:
+                session_id, channel, chat_id, revision = await asyncio.wait_for(
+                    self._save_queue.get(), timeout=0.5
+                )
+            except asyncio.TimeoutError:
+                if not self._running and self._save_queue.empty():
+                    break
+                continue
+            try:
+                latest = self._save_revisions.get(session_id, 0)
+                if revision != latest:
+                    continue
+                session = self.store.load_session_record(session_id)
+                if not session or not session.has_meaningful_content():
+                    continue
+                summary, memory_update = await self.archiver.summarize_session(session)
+                if revision != self._save_revisions.get(session_id, 0):
+                    continue
+                session.summary = summary
+                session.updated_at = datetime.now().isoformat()
+                self.store.memory_path().write_text(memory_update, encoding="utf-8")
+                self.store.save_session_record(session, channel=channel, chat_id=chat_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Background session save failed for {}", session_id)
+            finally:
+                self._save_queue.task_done()
+
+    @staticmethod
+    def _session_preview(summary: str) -> str:
+        text = (summary or "").strip()
+        if not text:
+            return "(No summary yet)"
+        line = text.splitlines()[0].strip()
+        return line[:120] + ("..." if len(line) > 120 else "")
+
+    @staticmethod
+    def _relative_time(iso_text: str | None) -> str:
+        if not iso_text:
+            return "just now"
+        try:
+            dt = datetime.fromisoformat(iso_text)
+        except Exception:
+            return "just now"
+        delta = datetime.now(dt.tzinfo) - dt
+        seconds = max(0, int(delta.total_seconds()))
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        days = hours // 24
+        return f"{days}d ago"
+
+    def _runtime_key(self, msg: InboundMessage, session_key: str | None = None) -> str:
+        return (session_key or msg.session_key).strip()
+
+    def _active_session(self, runtime_key: str) -> ChatSession:
+        active_id = self.store.resolve_active_session(runtime_key)
+        return self.store.get_or_create_session_record(active_id)
+
+    @staticmethod
+    def _has_meaningful_messages(messages: list[dict[str, Any]]) -> bool:
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content")
+            if role in {"user", "assistant", "system"} and content:
+                return True
+        return False
+
+    def _session_offset(self, session_id: str, total_messages: int) -> int:
+        offset = self._context_offsets.get(session_id, 0)
+        if offset < 0 or offset > total_messages:
+            return 0
+        return offset
+
+    @staticmethod
+    def _is_positive_int(text: str) -> bool:
+        return text.isdigit() and int(text) > 0
+
+    def _format_sessions_page(self, entries: list[dict[str, Any]], page: int) -> str:
+        if not entries:
+            return "No saved sessions yet."
+        per_page = 5
+        total_pages = (len(entries) + per_page - 1) // per_page
+        if page > total_pages:
+            return f"Only {total_pages} pages available."
+        start = (page - 1) * per_page
+        selected = entries[start : start + per_page]
+        lines: list[str] = []
+        for item in selected:
+            sid = str(item.get("id") or item.get("session_id") or "")
+            raw_meta = item.get("metadata")
+            meta = raw_meta if isinstance(raw_meta, dict) else {}
+            updated = str((meta or {}).get("updated_at") or item.get("archived_at") or "")
+            summary = str(item.get("summary") or "")
+            lines.append(f"{sid} · {self._relative_time(updated)}")
+            lines.append(f"  {self._session_preview(summary)}")
+            lines.append("")
+        footer = f"Page {page} of {total_pages}"
+        if page < total_pages:
+            footer += f" · /sessions {page + 1} for older"
+        lines.append(footer)
+        return "\n".join(lines).strip()
+
+    def _build_temp_prompt(self) -> str:
+        soul_path = self.store.soul_path()
+        soul = soul_path.read_text(encoding="utf-8").strip() if soul_path.exists() else ""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        parts = [
+            "# Mike",
+            "You are Mike, a focused personal assistant bot.",
+            f"Current local time: {now}",
+        ]
+        if soul:
+            parts.extend(["", "## SOUL", soul])
+        return "\n".join(parts)
+
+    async def _run_temp_message(
+        self, query: str, msg: InboundMessage, model: str | None = None
+    ) -> OutboundMessage:
+        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"), model)
+        messages = [
+            {"role": "system", "content": self._build_temp_prompt()},
+            {
+                "role": "user",
+                "content": f"{ContextBuilder._build_runtime_context(msg.channel, msg.chat_id)}\n\n{query}",
+            },
+        ]
+        final_content, _, _ = await self._run_agent_loop(messages, model=model)
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=final_content or "I've completed processing but have no response to give.",
+            metadata=msg.metadata or {},
+        )
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict[str, Any]],
@@ -404,7 +572,8 @@ class AgentLoop:
     ) -> OutboundMessage | None:
         if msg.channel == "system":
             if (msg.metadata or {}).get("_task_result"):
-                session = self.store.get(msg.chat_id)
+                session_id = msg.chat_id.strip().lower()
+                session = self.store.get_or_create_session_record(session_id)
                 session.add_message(
                     "system",
                     msg.content,
@@ -412,45 +581,185 @@ class AgentLoop:
                     task_label=(msg.metadata or {}).get("task_label"),
                     task_status=(msg.metadata or {}).get("task_status"),
                 )
-                self.store.save(session)
+                self.store.save_session_record(session, channel="system", chat_id=msg.chat_id)
                 return None
-        key = session_key or msg.session_key
-        session = self.store.get(key)
-        cmd = msg.content.strip().lower()
+        runtime_key = self._runtime_key(msg, session_key)
+        session = self._active_session(runtime_key)
+        active_session_id = session.key
+        raw_content = msg.content.strip()
+        cmd = raw_content.lower()
+
         if cmd == "/new":
-            if not session.has_meaningful_content():
-                session.clear()
-                self.store.save(session)
-                return OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id, content="New session started."
-                )
-            try:
-                archived = await self.archiver.archive_session(
-                    session, channel=msg.channel, chat_id=msg.chat_id
-                )
-            except Exception as exc:
-                logger.exception("Failed to archive session {}", key)
+            offset = self._session_offset(active_session_id, len(session.messages))
+            active_slice = session.messages[offset:]
+            if not self._has_meaningful_messages(active_slice):
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content=f"Archiving failed, session not cleared. {exc}",
+                    content="Fresh session is already active.",
                 )
-            session = self.store.reset(key, preserve_model=True)
+            self.store.save_session_record(session, channel=msg.channel, chat_id=msg.chat_id)
+            await self._enqueue_background_save(active_session_id, msg.channel, msg.chat_id)
+            if self._attached_mode.get(runtime_key):
+                self._context_offsets[active_session_id] = len(session.messages)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"Session `{active_session_id}` saved. Fresh context started on the same session.",
+                )
+            new_session_id = self.store.clear_active_session(runtime_key)
+            self._attached_mode[runtime_key] = False
+            self.store.get_or_create_session_record(new_session_id)
+            self._context_offsets[new_session_id] = 0
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content=f"Conversation archived as '{archived.title}' and new session started.",
+                content=f"Session `{active_session_id}` saved. New session `{new_session_id}` started.",
             )
+
         if cmd == "/clear":
-            session = self.store.reset(key, preserve_model=True)
+            session = self.store.reset_session_record(active_session_id, preserve_model=True)
+            self._context_offsets[active_session_id] = 0
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="Chat cleared."
             )
+
+        if cmd.startswith("/attach"):
+            parts = raw_content.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Usage: /attach <id>",
+                )
+            target = parts[1].strip().lower()
+            if target == active_session_id:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"You're already in session `{target}`.",
+                )
+            if not self.store.session_record_exists(target):
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"Session `{target}` not found.",
+                )
+            self.store.set_active_session(runtime_key, target)
+            self._attached_mode[runtime_key] = True
+            loaded = self.store.get_or_create_session_record(target)
+            self._context_offsets[target] = 0
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Attached session `{target}`.",
+            )
+
+        if cmd.startswith("/fork"):
+            parts = raw_content.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Usage: /fork <id>",
+                )
+            target = parts[1].strip().lower()
+            source = self.store.load_session_record(target)
+            if not source:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"Session `{target}` not found.",
+                )
+            new_id = self.store.new_session_id()
+            now = datetime.now().isoformat()
+            forked = ChatSession(
+                key=new_id,
+                summary=source.summary,
+                current_model=source.current_model,
+                messages=json.loads(json.dumps(source.messages, ensure_ascii=False)),
+                created_at=now,
+                updated_at=now,
+            )
+            self.store.save_session_record(forked, channel=msg.channel, chat_id=msg.chat_id)
+            self.store.set_active_session(runtime_key, new_id)
+            self._attached_mode[runtime_key] = False
+            self._context_offsets[new_id] = 0
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Forked session `{target}` as `{new_id}`.",
+            )
+
+        if cmd == "/sessions" or cmd.startswith("/sessions "):
+            arg = raw_content[len("/sessions") :].strip()
+            if not arg:
+                entries = self.store.list_session_entries()
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self._format_sessions_page(entries, 1),
+                )
+            if arg.lower().startswith("search"):
+                query = arg[6:].strip()
+                if not query:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="Usage: /sessions search <query>",
+                    )
+                matches = self.store.search_session_entries(query, limit=5)
+                if not matches:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"No sessions matching `{query}`.",
+                    )
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self._format_sessions_page(matches, 1),
+                )
+            if not self._is_positive_int(arg):
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Usage: /sessions [page]",
+                )
+            page = int(arg)
+            entries = self.store.list_session_entries()
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._format_sessions_page(entries, page),
+            )
+
+        if cmd.startswith("/temp") or cmd.startswith("/btw"):
+            prefix = "/temp" if cmd.startswith("/temp") else "/btw"
+            query = raw_content[len(prefix) :].strip()
+            if not query:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"Usage: {prefix} <question>",
+                )
+            return await self._run_temp_message(
+                query,
+                msg,
+                model=self._get_effective_model(session),
+            )
+
         if cmd == "/help":
             lines = [
                 "Mike commands:",
                 "/new - Start a new conversation",
                 "/clear - Clear chat instantly",
+                "/attach <id> - Resume a saved session",
+                "/fork <id> - Fork a saved session",
+                "/sessions [page] - List saved sessions",
+                "/sessions search <query> - Search sessions",
+                "/temp <question> - One-off question with SOUL only",
+                "/btw <question> - Alias for /temp",
                 "/stop - Stop the current task",
                 "/restart - Restart the bot",
                 "/help - Show available commands",
@@ -468,8 +777,10 @@ class AgentLoop:
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines)
             )
+
         if cmd == "/model" or cmd.startswith("/model "):
             return await self._handle_model_command(msg, session)
+
         if cmd.startswith("/research"):
             task = msg.content[len("/research") :].strip()
             if not task:
@@ -480,17 +791,21 @@ class AgentLoop:
                 )
             result = await self.research.start_task(
                 query=task,
-                session_key=key,
+                session_key=active_session_id,
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 model=self._get_effective_model(session),
                 kind="research",
             )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+
         if cmd == "/status":
             return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=self.research.format_status(key)
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self.research.format_status(active_session_id),
             )
+
         if cmd.startswith("/context"):
             extra = msg.content[len("/context") :].strip()
             if not extra:
@@ -499,8 +814,9 @@ class AgentLoop:
                     chat_id=msg.chat_id,
                     content="Usage: /context <extra information>",
                 )
-            result = await self.research.inject_context(key, extra)
+            result = await self.research.inject_context(active_session_id, extra)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+
         if cmd.startswith("/write"):
             if not self.writing:
                 return OutboundMessage(
@@ -509,8 +825,11 @@ class AgentLoop:
                     content="Writing mode is not available.",
                 )
             directive = msg.content[len("/write") :].strip()
-            result = await self.writing.write_on_demand(directive, key, msg.channel, msg.chat_id)
+            result = await self.writing.write_on_demand(
+                directive, active_session_id, msg.channel, msg.chat_id
+            )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
+
         if cmd.startswith("/story"):
             if not self.writing:
                 return OutboundMessage(
@@ -528,7 +847,9 @@ class AgentLoop:
             action = parts[1].lower()
             if action == "start":
                 directive = parts[2] if len(parts) > 2 else ""
-                result = await self.writing.start_story(directive, key, msg.channel, msg.chat_id)
+                result = await self.writing.start_story(
+                    directive, active_session_id, msg.channel, msg.chat_id
+                )
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
             if action == "next":
                 story_id = parts[2].strip() if len(parts) > 2 else ""
@@ -538,7 +859,9 @@ class AgentLoop:
                         chat_id=msg.chat_id,
                         content="Usage: /story next <story_id>",
                     )
-                result = await self.writing.continue_story(story_id, key, msg.channel, msg.chat_id)
+                result = await self.writing.continue_story(
+                    story_id, active_session_id, msg.channel, msg.chat_id
+                )
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=result)
             return OutboundMessage(
                 channel=msg.channel,
@@ -568,8 +891,10 @@ class AgentLoop:
         if isinstance(message_tool, MessageTool):
             message_tool.start_turn()
         history = session.history()
+        offset = self._session_offset(active_session_id, len(history))
+        history = history[offset:]
         initial_messages = self.context.build_messages(
-            key,
+            active_session_id,
             history,
             msg.content,
             media=msg.media or None,
@@ -595,7 +920,7 @@ class AgentLoop:
         )
         final_content = final_content or "I've completed processing but have no response to give."
         self._save_turn(session, all_msgs, 1 + len(history))
-        self.store.save(session)
+        self.store.save_session_record(session, channel=msg.channel, chat_id=msg.chat_id)
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
             return None
         return OutboundMessage(
@@ -626,7 +951,8 @@ class AgentLoop:
         if subcmd == "reset":
             old = self._get_effective_model(session)
             session.current_model = None
-            self.store.save(session)
+            session.updated_at = datetime.now().isoformat()
+            self.store.save_session_record(session, channel=msg.channel, chat_id=msg.chat_id)
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -635,7 +961,8 @@ class AgentLoop:
         if subcmd in SUPPORTED_MODELS:
             old = self._get_effective_model(session)
             session.current_model = subcmd
-            self.store.save(session)
+            session.updated_at = datetime.now().isoformat()
+            self.store.save_session_record(session, channel=msg.channel, chat_id=msg.chat_id)
             note = " Supports images." if SUPPORTED_MODELS[subcmd]["vision"] else " Text-only."
             return OutboundMessage(
                 channel=msg.channel,

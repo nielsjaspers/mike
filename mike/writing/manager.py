@@ -232,7 +232,9 @@ class WritingManager:
     def _model_for_session(self, source_session_key: str | None) -> str | None:
         if source_session_key:
             try:
-                chat_session = self.agent_loop.store.get(source_session_key)
+                chat_session = self.agent_loop.store.get_or_create_session_record(
+                    source_session_key
+                )
                 model = (chat_session.current_model or "").strip()
                 if model and model in SUPPORTED_MODELS:
                     return model

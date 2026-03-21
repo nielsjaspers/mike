@@ -26,6 +26,11 @@ class TelegramBot:
         BotCommand("start", "Start the bot"),
         BotCommand("new", "Start a new conversation"),
         BotCommand("clear", "Clear chat instantly"),
+        BotCommand("attach", "Resume a saved session"),
+        BotCommand("fork", "Fork a saved session"),
+        BotCommand("sessions", "List or search sessions"),
+        BotCommand("temp", "One-off question"),
+        BotCommand("btw", "Alias for temp"),
         BotCommand("stop", "Stop the current task"),
         BotCommand("help", "Show available commands"),
         BotCommand("restart", "Restart the bot"),
@@ -85,6 +90,11 @@ class TelegramBot:
         for name in (
             "new",
             "clear",
+            "attach",
+            "fork",
+            "sessions",
+            "temp",
+            "btw",
             "stop",
             "restart",
             "model",
@@ -219,6 +229,12 @@ class TelegramBot:
             "Mike commands:\n"
             "/new - Start a new conversation\n"
             "/clear - Clear chat instantly\n"
+            "/attach <id> - Resume a saved session\n"
+            "/fork <id> - Fork a saved session\n"
+            "/sessions [page] - List saved sessions\n"
+            "/sessions search <query> - Search sessions\n"
+            "/temp <question> - One-off question\n"
+            "/btw <question> - Alias for /temp\n"
             "/stop - Stop the current task\n"
             "/model - Show or switch model\n"
             "/research - Run a complex task in OpenCode\n"

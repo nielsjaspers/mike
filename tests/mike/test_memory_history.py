@@ -70,3 +70,78 @@ def test_search_helpers_work_for_memory_and_history(tmp_path: Path):
     assert matches and matches[0].archive_id == "abc123"
     memory = search_memory_sections(store.memory_path(), "concise summaries", max_chars=500)
     assert "User likes concise summaries." in memory
+
+
+def test_session_id_generation_and_record_roundtrip(tmp_path: Path):
+    cfg = MikeConfig(data_dir=str(tmp_path / "mike-data"))
+    store = ChatStore(cfg)
+    session_id = store.new_session_id()
+    assert len(session_id) == 5
+    assert session_id.isalnum()
+
+    session = ChatSession(
+        key=session_id,
+        summary="Long-form summary\nSecond line",
+        current_model="glm-5",
+        messages=[{"role": "user", "content": "hello", "timestamp": "2026-01-01T00:00:00"}],
+    )
+    store.save_session_record(session, channel="cli", chat_id="direct")
+    loaded = store.load_session_record(session_id)
+    assert loaded is not None
+    assert loaded.key == session_id
+    assert loaded.current_model == "glm-5"
+    assert loaded.summary.startswith("Long-form summary")
+    assert len(loaded.messages) == 1
+
+    entries = store.list_session_entries()
+    assert entries
+    assert entries[0]["id"] == session_id
+
+
+def test_session_search_matches_summary_case_insensitive(tmp_path: Path):
+    cfg = MikeConfig(data_dir=str(tmp_path / "mike-data"))
+    store = ChatStore(cfg)
+    session = ChatSession(key="a1b2c", summary="Researching API pagination behavior")
+    store.save_session_record(session, channel="cli", chat_id="direct")
+    matches = store.search_session_entries("pAgInAtIoN", limit=5)
+    assert matches
+    assert matches[0]["id"] == "a1b2c"
+
+
+def test_legacy_history_entries_with_existing_records_are_listed_as_sessions(tmp_path: Path):
+    cfg = MikeConfig(data_dir=str(tmp_path / "mike-data"))
+    store = ChatStore(cfg)
+    record_id = "abc12"
+    store.history_record_path(record_id).write_text(
+        json.dumps(
+            {
+                "id": record_id,
+                "title": "Legacy archive",
+                "summary": "Old summary from archive flow",
+                "full_chat_log": [{"role": "user", "content": "hello"}],
+                "metadata": {"channel": "cli", "chat_id": "direct"},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    store.history_index_path().write_text(
+        json.dumps(
+            [
+                {
+                    "id": record_id,
+                    "title": "Legacy archive",
+                    "summary": "Old summary from archive flow",
+                    "archived_at": "2026-03-15T12:00:00",
+                    "metadata": {"channel": "cli", "chat_id": "direct"},
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    entries = store.list_session_entries()
+    assert entries
+    assert entries[0]["id"] == record_id
