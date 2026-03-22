@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 COMMANDS = [
     "start",
     "new",
@@ -16,4 +15,5 @@ COMMANDS = [
     "context",
     "write",
     "story",
+    "schedule",
 ]

@@ -7,7 +7,6 @@ from pathlib import Path
 from mike.common import ensure_dir
 from mike.config import MikeConfig
 
-
 DEFAULT_SOUL = "# SOUL\n\nYou are Mike, a focused personal assistant bot.\n"
 DEFAULT_USER = "# USER\n\nDescribe the owner, preferences, and standing instructions here.\n"
 DEFAULT_MEMORY = (
@@ -49,6 +48,7 @@ def ensure_root(config: MikeConfig) -> Path:
     ensure_dir(root / "writing")
     ensure_dir(root / "writing" / "works")
     ensure_dir(root / "writing" / "stories")
+    ensure_dir(root / "schedules")
     ensure_shared_files(root)
     seed_research_skill(config, root)
     return root

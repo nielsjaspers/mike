@@ -40,6 +40,7 @@ class TelegramBot:
         BotCommand("context", "Add context to a running task"),
         BotCommand("write", "Write a creative piece now"),
         BotCommand("story", "Manage chaptered stories"),
+        BotCommand("schedule", "Manage schedules and reminders"),
     ]
 
     def __init__(self, config: MikeConfig, bus: MessageBus, store: ChatStore):
@@ -103,6 +104,7 @@ class TelegramBot:
             "context",
             "write",
             "story",
+            "schedule",
         ):
             self._app.add_handler(CommandHandler(name, self._forward_command))
         self._app.add_handler(
@@ -242,6 +244,7 @@ class TelegramBot:
             "/context - Add context to a running task\n"
             "/write - Write a creative piece now\n"
             "/story - Story mode commands\n"
+            "/schedule - Manage schedules and reminders\n"
             "/restart - Restart the bot\n"
             "/help - Show available commands"
         )

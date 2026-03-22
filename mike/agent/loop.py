@@ -14,7 +14,6 @@ from typing import Any, Awaitable, Callable
 from loguru import logger
 
 from mike.bus import MessageBus
-from mike.memory.archive import ArchiveManager
 from mike.chat.models import (
     DEFAULT_MODEL,
     SUPPORTED_MODELS,
@@ -24,6 +23,9 @@ from mike.chat.models import (
 from mike.chat.prompts import build_system_prompt
 from mike.chat.reasoning import build_reasoning_kwargs
 from mike.config import MikeConfig
+from mike.helpers import build_assistant_message, detect_image_mime
+from mike.llm import LLMProvider
+from mike.memory.archive import ArchiveManager
 from mike.skills import build_summary
 from mike.storage.chats import ChatSession, ChatStore
 from mike.tasks.research import ResearchManager
@@ -34,11 +36,10 @@ from mike.tools.memory import ReadMemoryTool
 from mike.tools.message import MessageTool
 from mike.tools.registry import ToolRegistry
 from mike.tools.research import ResearchTool
+from mike.tools.schedule import ScheduleTool
 from mike.tools.shell import ExecTool
 from mike.tools.web import WebFetchTool, WebSearchTool
 from mike.types import InboundMessage, OutboundMessage
-from mike.helpers import build_assistant_message, detect_image_mime
-from mike.llm import LLMProvider
 
 
 class ContextBuilder:
@@ -182,6 +183,7 @@ class AgentLoop:
         self.archiver = ArchiveManager(store, provider, self._get_effective_model)
         self.tools = ToolRegistry()
         self.writing = writing
+        self.schedule_manager: Any = None
         self._running = False
         self._processing_lock = asyncio.Lock()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}
@@ -220,6 +222,7 @@ class AgentLoop:
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(OpenCodeDelegateTool(manager=self.research))
         self.tools.register(ResearchTool(manager=self.research))
+        self.tools.register(ScheduleTool(manager=None))
 
     async def run(self) -> None:
         self._running = True
@@ -500,6 +503,61 @@ class AgentLoop:
             metadata=msg.metadata or {},
         )
 
+    async def _run_schedule_command(self, text: str, msg: InboundMessage) -> OutboundMessage:
+        schedule_tool = self.tools.get("schedule")
+        if schedule_tool is None:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Schedule tool not available.",
+            )
+        schedule_tool.set_context(msg.channel, msg.chat_id)
+        message_tool = self.tools.get("message")
+        if message_tool:
+            if hasattr(message_tool, "set_context"):
+                message_tool.set_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+            if hasattr(message_tool, "start_turn"):
+                message_tool.start_turn()
+
+        schedule_system = (
+            "You are Mike's scheduling assistant. You MUST use the 'schedule' tool to handle any "
+            "scheduling request before responding to the user. Never make up schedule IDs or pretend "
+            "to create/modify schedules without calling the tool. "
+            "For any scheduling action (create/list/show/update/pause/resume/delete/run_now), "
+            "call the schedule tool with appropriate parameters.\n"
+            "When creating a schedule, extract: what to do (prompt), when to run (when_text or recurrence_text), "
+            "and set kind explicitly. If the user asks to be reminded, use kind='reminder'. Otherwise use kind='task'. "
+            "Natural language like 'in 5 minutes', 'tomorrow at 09:00', 'every day at 09:00' are valid time specs.\n"
+            "After the tool returns, summarize the result for the user clearly. Never use emojis."
+        )
+
+        soul_path = self.store.soul_path()
+        soul = soul_path.read_text(encoding="utf-8").strip() if soul_path.exists() else ""
+        if soul:
+            schedule_system = f"{schedule_system}\n\n## SOUL\n{soul}"
+
+        messages = [
+            {"role": "system", "content": schedule_system},
+            {
+                "role": "user",
+                "content": f"{ContextBuilder._build_runtime_context(msg.channel, msg.chat_id)}\n\n{text}",
+            },
+        ]
+
+        final_content, _, _ = await self._run_agent_loop(messages, model=self.model)
+
+        sent_in_turn = False
+        if message_tool and hasattr(message_tool, "_sent_in_turn"):
+            sent_in_turn = bool(message_tool._sent_in_turn)
+        if sent_in_turn:
+            return None
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=final_content or "Schedule command completed with no output.",
+            metadata=msg.metadata or {},
+        )
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict[str, Any]],
@@ -647,7 +705,6 @@ class AgentLoop:
                 )
             self.store.set_active_session(runtime_key, target)
             self._attached_mode[runtime_key] = True
-            loaded = self.store.get_or_create_session_record(target)
             self._context_offsets[target] = 0
             return OutboundMessage(
                 channel=msg.channel,
@@ -773,6 +830,7 @@ class AgentLoop:
                 "/story list - List active story projects",
                 "/story start <directive> - Start a chaptered story",
                 "/story next <story_id> - Write next chapter",
+                "/schedule - Manage scheduled tasks and reminders",
             ]
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines)
@@ -868,6 +926,19 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content="Usage: /story list | /story start <directive> | /story next <story_id>",
             )
+
+        if cmd.startswith("/schedule"):
+            if self.schedule_manager is None:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Scheduling is not available.",
+                )
+            raw = msg.content[len("/schedule") :].strip()
+            schedule_tool = self.tools.get("schedule")
+            if schedule_tool:
+                schedule_tool.set_context(msg.channel, msg.chat_id)
+            return await self._run_schedule_command(raw, msg)
 
         creative = bool((msg.metadata or {}).get("_creative_soul"))
 
@@ -1046,3 +1117,141 @@ class AgentLoop:
             msg, session_key=session_key, on_progress=on_progress
         )
         return response.content if response else ""
+
+    async def run_isolated_task(
+        self,
+        prompt: str,
+        schedule_id: str,
+        run_id: str,
+        model: str | None = None,
+    ) -> tuple[str, list[str]]:
+        from mike.tools.delegate import OpenCodeDelegateTool
+        from mike.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+        from mike.tools.message import MessageTool
+        from mike.tools.registry import ToolRegistry
+        from mike.tools.research import ResearchTool
+        from mike.tools.shell import ExecTool
+        from mike.tools.web import WebFetchTool, WebSearchTool
+
+        root = self.config.project_root_path
+        allowed = root if self.config.restrict_shell_to_project else None
+
+        isolated_tools = ToolRegistry()
+        isolated_tools.register(ReadFileTool(workspace=root, allowed_dir=allowed))
+        isolated_tools.register(WriteFileTool(workspace=root, allowed_dir=allowed))
+        isolated_tools.register(EditFileTool(workspace=root, allowed_dir=allowed))
+        isolated_tools.register(ListDirTool(workspace=root, allowed_dir=allowed))
+        isolated_tools.register(
+            ExecTool(
+                timeout=self.config.command_timeout,
+                working_dir=str(root),
+                restrict_to_workspace=self.config.restrict_shell_to_project,
+            )
+        )
+        isolated_tools.register(
+            WebSearchTool(
+                cli_bin=self.config.opencode_server_bin,
+                attach_url=self.config.opencode_server_url,
+                provider_id=self.config.opencode_model_provider_id,
+            )
+        )
+        isolated_tools.register(WebFetchTool(proxy=self.config.telegram_proxy))
+        isolated_tools.register(MessageTool(send_callback=self.bus.publish_outbound))
+        isolated_tools.register(OpenCodeDelegateTool(manager=self.research))
+        isolated_tools.register(ResearchTool(manager=self.research))
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        system_parts = [
+            "# Mike",
+            "You are Mike, a focused personal assistant bot.",
+            f"Current local time: {now_str}",
+        ]
+        soul_path = self.store.soul_path()
+        if soul_path.exists():
+            soul = soul_path.read_text(encoding="utf-8").strip()
+            if soul:
+                system_parts.extend(["", "## SOUL", soul])
+        user_path = self.store.user_path()
+        if user_path.exists():
+            user = user_path.read_text(encoding="utf-8").strip()
+            if user:
+                system_parts.extend(["", "## USER", user])
+        skills_summary = build_summary(self.store.shared_root)
+        if skills_summary:
+            system_parts.extend(["", "## Skills", skills_summary])
+        system_parts.extend(
+            [
+                "",
+                "## Scheduled Execution Mode",
+                "You are running a scheduled task. Do NOT access or reference any prior chat history.",
+                "If you produce files that should be attached to the final result, declare them explicitly.",
+                "End your response with a JSON block like:",
+                "```json",
+                '{"summary": "Brief description of what was done.", "outputs": ["path/to/file.md"]}',
+                "```",
+            ]
+        )
+        system_prompt = "\n".join(system_parts)
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"[Scheduled task]\n\n{prompt}",
+            },
+        ]
+
+        effective_model = model or self.model or DEFAULT_MODEL
+        reasoning = build_reasoning_kwargs(effective_model)
+        max_tokens = clamp_max_tokens(effective_model, self.config.max_tokens)
+
+        iteration = 0
+        final_text = None
+        produced_files: list[str] = []
+
+        async def isolated_execute(name: str, params: dict) -> str:
+            result = await isolated_tools.execute(name, params)
+            if name == "write_file" and isinstance(params.get("path"), str):
+                path = params["path"]
+                if path not in produced_files:
+                    produced_files.append(path)
+            return result
+
+        while iteration < self.config.max_tool_iterations:
+            iteration += 1
+            response = await self.provider.chat_with_retry(
+                messages=messages,
+                tools=isolated_tools.get_definitions(),
+                model=effective_model,
+                max_tokens=max_tokens,
+                thinking=reasoning.get("thinking"),
+                reasoning_effort=reasoning.get("reasoning_effort"),
+            )
+            if response.has_tool_calls:
+                tool_call_dicts = [call.to_openai_tool_call() for call in response.tool_calls]
+                messages.append(
+                    build_assistant_message(
+                        response.content,
+                        tool_calls=tool_call_dicts,
+                        reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
+                    )
+                )
+                for call in response.tool_calls:
+                    result = await isolated_execute(call.name, call.arguments)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "name": call.name,
+                            "content": result,
+                        }
+                    )
+                continue
+            final_text = response.content
+            break
+
+        if final_text is None:
+            final_text = "Task completed with no output."
+
+        return final_text, produced_files

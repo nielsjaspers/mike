@@ -46,6 +46,13 @@ class MikeConfig(BaseModel):
     skills_dir: str = ".opencode/skills"
     deep_research_skill_path: str = "mike/resources/deep-research/SKILL.md"
 
+    schedule_enabled: bool = True
+    schedule_timezone: str = "Europe/Amsterdam"
+    schedule_poll_interval: float = 30.0
+    schedule_max_catch_up: int = 100
+    schedule_retry_attempts: int = 3
+    schedule_retry_base_delay: float = 60.0
+
     @property
     def data_dir_path(self) -> Path:
         return Path(self.data_dir).expanduser().resolve()

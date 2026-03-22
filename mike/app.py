@@ -16,6 +16,8 @@ from mike.bus import MessageBus
 from mike.config import MikeConfig, default_config_path, load_config, save_config
 from mike.opencode.server import OpencodeServer
 from mike.provider import make_provider
+from mike.scheduling.manager import ScheduleManager
+from mike.scheduling.store import ScheduleStore
 from mike.storage.chats import ChatStore
 from mike.storage.tasks import TaskStore
 from mike.tasks.manager import TaskManager
@@ -49,9 +51,22 @@ def build_runtime(config: MikeConfig):
     writing_store = WritingStore(config.data_dir_path / "writing")
     writing = WritingManager(config=config, bus=bus, store=writing_store, agent_loop=loop)
     loop.writing = writing
+    schedule_store = ScheduleStore(config.data_dir_path / "schedules")
+    schedule = ScheduleManager(config=config, bus=bus, store=schedule_store)
+    loop.schedule_manager = schedule
+    schedule_tool = loop.tools.get("schedule")
+    if schedule_tool is not None:
+        schedule_tool.set_manager(schedule)  # type: ignore[attr-defined]
+
+    async def execute_scheduled_task(
+        prompt: str, chat_id: str, schedule_id: str, run_id: str, model: str | None
+    ) -> tuple[str, list[str]]:
+        return await loop.run_isolated_task(prompt, schedule_id, run_id, model)
+
+    schedule.set_execute_callback(execute_scheduled_task)
     telegram = TelegramBot(config, bus, store)
     server = OpencodeServer(config)
-    return bus, loop, telegram, server, provider, writing
+    return bus, loop, telegram, server, provider, writing, schedule
 
 
 @app.command()
@@ -89,7 +104,7 @@ def gateway(
     console.print("Starting Mike gateway...")
 
     async def run() -> None:
-        bus, loop, telegram, server, provider, writing = build_runtime(config)
+        bus, loop, telegram, server, provider, writing, schedule = build_runtime(config)
         try:
             await server.ensure_running()
             console.print(f"[green]OK[/green] OpenCode Serve: {config.opencode_server_url}")
@@ -102,6 +117,8 @@ def gateway(
             tasks = [asyncio.create_task(loop.run())]
             if config.nocturne_enabled:
                 tasks.append(asyncio.create_task(writing.start()))
+            if config.schedule_enabled:
+                tasks.append(asyncio.create_task(schedule.start()))
             if config.telegram_enabled:
                 tasks.append(asyncio.create_task(telegram.start()))
                 tasks.append(asyncio.create_task(telegram.bridge_outbound()))
@@ -109,6 +126,7 @@ def gateway(
         finally:
             loop.stop()
             writing.stop()
+            schedule.stop()
             await telegram.stop()
             await server.stop()
             await _maybe_aclose(provider)
@@ -129,7 +147,7 @@ def agent(
         console.print(f"[green]OK[/green] Created config at {path}")
 
     async def run_once() -> None:
-        _bus, loop, _telegram, server, provider, writing = build_runtime(config)
+        _bus, loop, _telegram, server, provider, writing, _schedule = build_runtime(config)
         try:
             await server.ensure_running()
             response = await loop.process_direct(message or "Hello", session_key=session_id)
