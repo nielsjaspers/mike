@@ -6,6 +6,12 @@ from typing import Any
 
 DEFAULT_ANTHROPIC_MAX_TOKENS = 127000
 
+# Model aliases: shorthand -> full model ID
+MODEL_ALIASES: dict[str, str] = {
+    "mimop": "mimo-v2-pro",
+    "mimov": "mimo-v2-omni",
+}
+
 SUPPORTED_MODELS: dict[str, dict[str, Any]] = {
     "kimi-k2.5": {
         "vision": True,
@@ -51,13 +57,37 @@ SUPPORTED_MODELS: dict[str, dict[str, Any]] = {
         "reasoning_param": "thinking",
         "reasoning_value": {"type": "enabled"},
     },
+    "mimo-v2-pro": {
+        "vision": False,
+        "description": "MiMo-V2-Pro - non-vision model with 1M context window",
+        "api_type": "openai-compatible",
+        "max_output_tokens": 1000000,
+        "endpoint": "/chat/completions",
+        "auth_header": "Authorization",
+        "auth_prefix": "Bearer ",
+        "reasoning_param": "reasoning_effort",
+        "reasoning_value": "high",
+    },
+    "mimo-v2-omni": {
+        "vision": True,
+        "description": "MiMo-V2-Omni - vision model with 200k context window",
+        "api_type": "openai-compatible",
+        "max_output_tokens": 200000,
+        "endpoint": "/chat/completions",
+        "auth_header": "Authorization",
+        "auth_prefix": "Bearer ",
+        "reasoning_param": "reasoning_effort",
+        "reasoning_value": "high",
+    },
 }
 
 DEFAULT_MODEL = "kimi-k2.5"
 
 
 def get_model(model_id: str) -> dict[str, Any] | None:
-    return SUPPORTED_MODELS.get(model_id)
+    # Resolve alias if present
+    resolved_id = MODEL_ALIASES.get(model_id, model_id)
+    return SUPPORTED_MODELS.get(resolved_id)
 
 
 def model_supports_vision(model_id: str) -> bool:

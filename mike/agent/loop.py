@@ -162,6 +162,8 @@ class AgentLoop:
         "minimax": "minimax-m2.7",
         "kimi": "kimi-k2.5",
         "glm": "glm-5",
+        "mimop": "mimo-v2-pro",
+        "mimov": "mimo-v2-omni",
     }
 
     def __init__(

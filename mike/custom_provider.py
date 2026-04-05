@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 import json_repair
 
-from mike.chat.models import SUPPORTED_MODELS, get_model
+from mike.chat.models import MODEL_ALIASES, SUPPORTED_MODELS, get_model
 from mike.llm import LLMProvider, LLMResponse, ToolCallRequest
 
 
@@ -41,6 +41,8 @@ class CustomProvider(LLMProvider):
         thinking: dict[str, Any] | None = None,
     ) -> LLMResponse:
         model_id = model or self.default_model
+        # Resolve alias to full model ID
+        model_id = MODEL_ALIASES.get(model_id, model_id)
         model_config = get_model(model_id) or {}
         api_type = model_config.get("api_type", "openai-compatible")
         if api_type == "anthropic-compatible":
